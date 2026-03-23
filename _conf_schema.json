@@ -1,0 +1,14 @@
+{
+    "recall_delay": {
+        "name": "自动撤回延迟 (秒)",
+        "description": "发送评分图片后多少秒自动撤回。0 表示不撤回。",
+        "type": "int",
+        "default": 0
+    },
+    "show_analyze_alert": {
+        "name": "显示分析提示",
+        "description": "是否在开始分析时发送“正在分析...”的提示消息。",
+        "type": "bool",
+        "default": true
+    }
+}
