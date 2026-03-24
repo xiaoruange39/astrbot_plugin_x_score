@@ -111,21 +111,7 @@ def _get_font_list(size: int, bold: bool = False):
 
 def _rounded_rect(draw: ImageDraw.ImageDraw, xy, radius, fill=None, outline=None, width=1):
     """绘制圆角矩形"""
-    x1, y1, x2, y2 = xy
     draw.rounded_rectangle(xy, radius=radius, fill=fill, outline=outline, width=width)
-
-
-def _draw_score_arc(img: Image.Image, center, radius, score, color):
-    """绘制评分圆弧"""
-    draw = ImageDraw.Draw(img)
-    x, y = center
-    bbox = (x - radius, y - radius, x + radius, y + radius)
-    # 背景圆弧
-    draw.arc(bbox, start=135, end=405, fill=(50, 50, 50), width=4)
-    # 评分圆弧
-    if isinstance(score, (int, float)) and score > 0:
-        end_angle = 135 + (score / 100) * 270
-        draw.arc(bbox, start=135, end=end_angle, fill=color, width=4)
 
 
 def _get_score_color(score) -> tuple:
@@ -296,20 +282,19 @@ def _draw_warning_banner(draw: ImageDraw.ImageDraw, x, y, width, text, fonts):
 
 # ==================== 头像和媒体处理 ====================
 
-async def _download_image(url: str, timeout_sec: int = 30) -> Image.Image | None:
-    """异步下载通用图片"""
+async def _download_image(session, url: str) -> Image.Image | None:
+    """异步下载通用图片，复用 session 并防止超大文件"""
     if not url:
         return None
-    import aiohttp
     try:
-        timeout = aiohttp.ClientTimeout(total=timeout_sec)
-        async with aiohttp.ClientSession(timeout=timeout) as session:
-            async with session.get(url) as resp:
-                if resp.status == 200:
-                    data = await resp.read()
-                    return Image.open(io.BytesIO(data)).convert("RGBA")
-                else:
-                    logger.warning(f"图片下载失败 HTTP {resp.status}: {url}")
+        async with session.get(url) as resp:
+            if resp.status == 200:
+                data = await resp.read()
+                if len(data) > 10 * 1024 * 1024:  # 限制最大10MB
+                    return None
+                return Image.open(io.BytesIO(data)).convert("RGBA")
+            else:
+                logger.warning(f"图片下载失败 HTTP {resp.status}: {url}")
     except Exception as e:
         logger.debug(f"图片下载异常: {type(e).__name__}: {e}")
     return None
@@ -324,11 +309,17 @@ def _make_circle_avatar(avatar: Image.Image, size: int) -> Image.Image:
     result.paste(avatar, (0, 0), mask)
     return result
 
-def _calculate_score_breakdown(score: int, detail: dict, data: dict | None = None) -> list:
+def _calculate_score_breakdown(score, detail: dict, data: dict | None = None) -> list:
     """逆推并分配分数明细，确保总和等于 score"""
     if data is None:
         data = {}
-    age = detail.get("account_age_years") or 0
+        
+    # 容错：转为数字
+    try:
+        age = float(detail.get("account_age_years", 0)) if detail.get("account_age_years") is not None else 0.0
+    except (ValueError, TypeError):
+        age = 0.0
+        
     fols = detail.get("followers") or 0
     twts = detail.get("tweets") or 0
     eng = detail.get("engagement") or ""
@@ -370,7 +361,11 @@ def _calculate_score_breakdown(score: int, detail: dict, data: dict | None = Non
     
     # 计算差值
     allocated = 20 + b_age + b_fol + b_twt + b_ver + b_act + b_eng + b_pos + b_neg + b_pin
-    diff = score - allocated
+    try:
+        score_val = float(score)
+        diff = int(score_val - allocated)
+    except (ValueError, TypeError):
+        diff = 0
     
     # 账号寿命展示
     if age > 0:
@@ -732,15 +727,18 @@ def _draw_sync(data: dict, avatar_img: Image.Image | None, media_imgs: list[Imag
     return buf.getvalue()
 
 async def render_report(data: dict, blur_media: bool = False) -> bytes:
+    import aiohttp
     avatar_url = data.get("avatar_url", "")
     media_urls = (data.get("media_urls") or [])[:4]
     
     logger.debug(f"头像: {bool(avatar_url)}, 媒体数: {len(media_urls)}")
     
-    tasks = [_download_image(avatar_url)]
-    for m_url in media_urls:
-        tasks.append(_download_image(m_url))
-    dl_results = await asyncio.gather(*tasks, return_exceptions=True)
+    timeout = aiohttp.ClientTimeout(total=30)
+    async with aiohttp.ClientSession(timeout=timeout) as session:
+        tasks = [_download_image(session, avatar_url)]
+        for m_url in media_urls:
+            tasks.append(_download_image(session, m_url))
+        dl_results = await asyncio.gather(*tasks, return_exceptions=True)
     
     avatar_img = dl_results[0] if isinstance(dl_results[0], Image.Image) else None
     media_imgs = [m for m in dl_results[1:] if isinstance(m, Image.Image)]

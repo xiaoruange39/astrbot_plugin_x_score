@@ -27,8 +27,14 @@ class FljPlugin(Star):
         super().__init__(context)
         self.config = config
         self._cache: dict[str, tuple[float, dict]] = {}  # username -> (timestamp, data)
-        self._pending: dict[str, asyncio.Future] = {}  # username -> Future (并发去重)
+        self._pending: dict[str, asyncio.Task] = {}  # username -> Task (并发去重)
         self._recall_tasks = set()  # 保存 asyncio.Task 强引用避免 GC 被意外回收
+        self._session: aiohttp.ClientSession | None = None
+        
+    def _get_session(self) -> aiohttp.ClientSession:
+        if self._session is None or self._session.closed:
+            self._session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=REQUEST_TIMEOUT))
+        return self._session
 
     @filter.command("X账号评分")
     async def query_x_account(self, event: AstrMessageEvent):
@@ -91,16 +97,16 @@ class FljPlugin(Star):
             )
             return
 
+        # 预先生成 fallback_text 以防止未定义错误
+        fallback_text = self._format_result(data)
+        
         # 根据配置选择输出模式
         output_mode = self.config.get("output_mode", "图片")
         
         message_data = None
-        img_path = None
         
         if output_mode == "文字":
-            text_result = self._format_result(data)
-            message_data = [{"type": "text", "data": {"text": text_result}}]
-            fallback_text = text_result
+            message_data = [{"type": "text", "data": {"text": fallback_text}}]
         else:
             # 图片模式
             blur_media = self.config.get("blur_media", False)
@@ -110,9 +116,7 @@ class FljPlugin(Star):
                 message_data = [{"type": "image", "data": {"file": f"base64://{img_base64}"}}]
             except Exception as e:
                 logger.error(f"[X账号评分] 图片渲染失败: {type(e).__name__}: {e}")
-                text_result = self._format_result(data)
-                message_data = [{"type": "text", "data": {"text": text_result}}]
-                fallback_text = text_result
+                message_data = [{"type": "text", "data": {"text": fallback_text}}]
 
         # 发送并处理撤回
         recall_delay = self.config.get("recall_delay", 0)
@@ -179,41 +183,42 @@ class FljPlugin(Star):
             else:
                 del self._cache[key]
         
-        # 2. 并发去重：如果已有相同请求在进行中，等待其结果
+        # 2. 并发去重
         if key in self._pending:
             logger.debug(f"[X账号评分] 合并请求: @{username}")
             return await self._pending[key]
         
-        # 3. 发起新请求
-        fut: asyncio.Future = asyncio.get_running_loop().create_future()
-        self._pending[key] = fut
-        
+        # 3. 发起新请求的后台任务
+        task = asyncio.create_task(self._do_fetch_verify(username, key))
+        self._pending[key] = task
         try:
-            params = {
-                "username": username,
-                "t": str(int(time.time() * 1000)),
-                "lang": "zh",
-                "source": "search",
-            }
-            timeout = aiohttp.ClientTimeout(total=REQUEST_TIMEOUT)
-            logger.info(f"[X账号评分] 查询 @{username}")
-            async with aiohttp.ClientSession(timeout=timeout) as session:
-                async with session.get(FLJ_VERIFY_URL, params=params) as resp:
-                    resp.raise_for_status()
-                    data = await resp.json()
-            
-            score = data.get("score", "?")
-            logger.info(f"[X账号评分] @{username} 评分: {score}")
-            
-            # 写入缓存
-            self._cache[key] = (time.time(), data)
-            fut.set_result(data)
-            return data
-        except Exception as e:
-            fut.set_exception(e)
-            raise
+            return await task
         finally:
             self._pending.pop(key, None)
+
+    async def _do_fetch_verify(self, username, key) -> dict:
+        params = {
+            "username": username,
+            "t": str(int(time.time() * 1000)),
+            "lang": "zh",
+            "source": "search",
+        }
+        logger.info(f"[X账号评分] 查询 @{username}")
+        session = self._get_session()
+        async with session.get(FLJ_VERIFY_URL, params=params) as resp:
+            resp.raise_for_status()
+            data = await resp.json()
+        
+        score = data.get("score", "?")
+        logger.info(f"[X账号评分] @{username} 评分: {score}")
+        
+        # 写入缓存，并限制最大缓存数量为 100
+        self._cache[key] = (time.time(), data)
+        if len(self._cache) > 100:
+            oldest_key = min(self._cache.keys(), key=lambda k: self._cache[k][0])
+            del self._cache[oldest_key]
+            
+        return data
 
     def _format_result(self, data: dict) -> str:
         """纯文本格式（完整版，与图片版内容一致）"""
@@ -381,4 +386,13 @@ class FljPlugin(Star):
 
     async def terminate(self):
         """插件卸载/停用时调用"""
-        pass
+        if self._session and not self._session.closed:
+            await self._session.close()
+            
+        for task in list(self._pending.values()) + list(self._recall_tasks):
+            if not task.done():
+                task.cancel()
+        
+        self._pending.clear()
+        self._recall_tasks.clear()
+        self._cache.clear()
