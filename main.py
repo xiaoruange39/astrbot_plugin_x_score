@@ -74,17 +74,6 @@ class FljPlugin(Star):
 
         try:
             data = await self._fetch_verify(username)
-        except aiohttp.ClientResponseError as e:
-            logger.error(f"[X账号评分] API 请求失败: HTTP {e.status}")
-            if e.status == 429:
-                yield event.plain_result(
-                    "🚦 当前访问量过大\n"
-                    "本小时内的 AI 分析额度已用完（保护公益资源）。\n"
-                    "请在【下一整点】后再尝试新的检索。"
-                )
-            else:
-                yield event.plain_result(f"❌ 网络请求失败 ({e.status})，请稍后重试。")
-            return
         except (TimeoutError, asyncio.TimeoutError):
             yield event.plain_result("❌ 请求超时（分析通常需要20-30秒），请稍后重试。")
             return
@@ -95,6 +84,17 @@ class FljPlugin(Star):
         except aiohttp.client_exceptions.ContentTypeError:
             logger.error("[X账号评分] API 返回的 Content-Type 异常")
             yield event.plain_result("❌ 远程接口维护中或网关故障(502/503)。")
+            return
+        except aiohttp.ClientResponseError as e:
+            logger.error(f"[X账号评分] API 响应异常: HTTP {e.status}")
+            if e.status == 429:
+                yield event.plain_result(
+                    "🚦 当前访问量过大\n"
+                    "本小时内的 AI 分析额度已用完（保护公益资源）。\n"
+                    "请在【下一整点】后再尝试新的检索。"
+                )
+            else:
+                yield event.plain_result(f"❌ 网络请求失败 ({e.status})，请稍后重试。")
             return
         except aiohttp.ClientError as e:
             logger.error(f"[X账号评分] 网络异常: {type(e).__name__}")
@@ -114,6 +114,7 @@ class FljPlugin(Star):
         output_mode = self.config.get("output_mode", "图片")
         
         message_data = None
+        img_bytes_cache = None
         
         if output_mode == "文字":
             message_data = [{"type": "text", "data": {"text": fallback_text}}]
@@ -121,14 +122,21 @@ class FljPlugin(Star):
             # 图片模式
             blur_media = self.config.get("blur_media", False)
             try:
-                img_bytes = await render_report(data, blur_media=blur_media)
-                img_base64 = base64.b64encode(img_bytes).decode('utf-8')
+                # 传入公用的 session 以复用连接
+                session = self._get_session()
+                img_bytes_cache = await render_report(session, data, blur_media=blur_media)
+                img_base64 = base64.b64encode(img_bytes_cache).decode('utf-8')
                 message_data = [{"type": "image", "data": {"file": f"base64://{img_base64}"}}]
             except Exception as e:
                 logger.error(f"[X账号评分] 图片渲染失败: {type(e).__name__}: {e}")
                 message_data = [{"type": "text", "data": {"text": fallback_text}}]
 
-        # 发送并处理撤回
+        # 调用独立的发送协程，彻底解耦业务流与分发链路
+        async for reply in self._dispatch_message(event, message_data, fallback_text, img_bytes_cache):
+            yield reply
+
+    async def _dispatch_message(self, event: AstrMessageEvent, message_data: list, fallback_text: str, img_bytes_cache: bytes | None):
+        """分发与发送引擎，支持平台特异性与通用降级，包含撤回调度"""
         recall_delay = self.config.get("recall_delay", 0)
         
         # 针对 aiocqhttp 平台使用更底层的 API 以确保获取 message_id 用于撤回
@@ -149,8 +157,8 @@ class FljPlugin(Star):
                             await asyncio.sleep(recall_delay)
                             try:
                                 await client.api.call_action("delete_msg", message_id=m_id)
-                            except Exception:
-                                pass
+                            except Exception as ex:
+                                logger.debug(f"[X账号评分] 撤回消息失败: {ex}")
                         
                         task = asyncio.create_task(do_recall(msg_id))
                         self._recall_tasks.add(task)
@@ -158,27 +166,30 @@ class FljPlugin(Star):
                     
                     return 
             except Exception as e:
-                logger.error(f"[X账号评分] 平台发送异常: {type(e).__name__}: {e}")
-        # 回退到通用发送方式
-        if message_data[0]["type"] == "text":
-            yield event.plain_result(fallback_text)
-        else:
-            # 对于不支持高阶 API 直接发送 base64 的通用平台，使用传统本地文件方式保证兼容性
-            import tempfile
-            img_data = base64.b64decode(message_data[0]["data"]["file"].replace("base64://", ""))
-            with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
-                tmp.write(img_data)
-                tmp_path = tmp.name
-                
-            try:
-                chain = MessageChain([AstrImage.fromFileSystem(tmp_path)])
-                await self.context.send_message(event.unified_msg_origin, chain)
-            except Exception as e:
-                logger.error(f"[X账号评分] 通用发送异常: {type(e).__name__}: {e}")
+                logger.error(f"[X账号评分] 原生发送组件失败，尝试通用下行降级: {e}")
+        
+        # 通用发送分支 (兜底或非 aiocqhttp 平台)
+        try:
+            if message_data[0]["type"] == "text":
                 yield event.plain_result(fallback_text)
-            finally:
-                if os.path.exists(tmp_path):
-                    os.remove(tmp_path)
+            elif message_data[0]["type"] == "image" and img_bytes_cache:
+                import tempfile
+                with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
+                    tmp.write(img_bytes_cache)
+                    tmp_path = tmp.name
+                    
+                try:
+                    chain = MessageChain([AstrImage.fromFileSystem(tmp_path)])
+                    await self.context.send_message(event.unified_msg_origin, chain)
+                finally:
+                    import os
+                    if os.path.exists(tmp_path):
+                        os.remove(tmp_path)
+            else:
+                yield event.plain_result(fallback_text)
+        except Exception as e:
+            logger.error(f"[X账号评分] 通用发送异常: {type(e).__name__}: {e}")
+            yield event.plain_result(fallback_text)
 
     async def _fetch_verify(self, username: str) -> dict:
         """调用 flj.info 验证接口，带缓存和并发去重"""
@@ -220,8 +231,13 @@ class FljPlugin(Star):
             # 增加 JSONDecodeError 等防范
             try:
                 data = await resp.json()
+            except aiohttp.client_exceptions.ContentTypeError as e:
+                raise e # Propagate to query_x_account
+            except json.JSONDecodeError as e:
+                raise e # Propagate to query_x_account
             except Exception as e:
-                # 若抛出异常将被外层的 query_x_account 针对性捕获
+                # Catch any other unexpected errors during JSON parsing
+                logger.error(f"[X账号评分] 解析 API 响应失败: {type(e).__name__}: {e}")
                 raise e
         
         score = data.get("score", "?")
@@ -248,7 +264,10 @@ class FljPlugin(Star):
         followers = detail.get("followers") or 0
         following = detail.get("following") or 0
         tweets = detail.get("tweets") or 0
-        account_age = detail.get("account_age_years") or 0
+        try:
+            account_age = float(detail.get("account_age_years", 0)) if detail.get("account_age_years") is not None else 0.0
+        except (ValueError, TypeError):
+            account_age = 0.0
         is_verified = detail.get("is_verified", False)
         is_welfare = detail.get("is_welfare", False)
         is_active = detail.get("is_active", False)
@@ -397,14 +416,25 @@ class FljPlugin(Star):
         return str(int(num))
 
     async def terminate(self):
-        """插件卸载/停用时调用"""
+        """生命周期结束时的清理工作，释放连接池和回收挂起的任务"""
         if self._session and not self._session.closed:
-            await self._session.close()
-            
-        for task in list(self._pending.values()) + list(self._recall_tasks):
-            if not task.done():
-                task.cancel()
+            asyncio.create_task(self._session.close())
         
+        # 稳妥地清理正在排队或挂起的任务
+        for t in self._pending.values():
+            if not t.done():
+                t.cancel()
+        
+        tasks_to_cancel = []
+        for t in self._recall_tasks:
+            if not t.done():
+                t.cancel()
+                tasks_to_cancel.append(t)
+        
+        if tasks_to_cancel:
+            # 在后台稍作等待，让被取消的任务妥善结束
+            await asyncio.gather(*tasks_to_cancel, return_exceptions=True)
+            
+        self._cache.clear()
         self._pending.clear()
         self._recall_tasks.clear()
-        self._cache.clear()

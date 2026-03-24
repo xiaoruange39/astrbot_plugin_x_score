@@ -8,10 +8,12 @@ import re
 import asyncio
 import platform
 import threading
-import urllib.parse
 from PIL import Image, ImageDraw, ImageFont, ImageFilter
 from astrbot.api import logger
 from .utils import calculate_score_weights
+
+# ==================== 安全防御 ====================
+Image.MAX_IMAGE_PIXELS = 10000000  # 限制解码炸弹图片最大像素约 10MP
 
 # ==================== 颜色常量 ====================
 BG_COLOR = (10, 10, 10)           # 主背景 #0a0a0a
@@ -86,6 +88,8 @@ def _find_chinese_font() -> str | None:
 _global_font = None
 _font_initialized = False
 _font_lock = threading.Lock()
+_font_cache = {}
+_cache_lock = threading.Lock()
 
 def _init_font():
     global _global_font, _font_initialized
@@ -101,8 +105,10 @@ def _get_font(size: int, bold: bool = False) -> ImageFont.FreeTypeFont:
     """获取支持中文的字体，延迟加载"""
     _init_font()
     key = f"{size}_{bold}"
-    if key in _font_cache:
-        return _font_cache[key]
+    
+    with _cache_lock:
+        if key in _font_cache:
+            return _font_cache[key]
 
     if _global_font:
         index = 1 if bold and _global_font.endswith(".ttc") else 0
@@ -113,7 +119,8 @@ def _get_font(size: int, bold: bool = False) -> ImageFont.FreeTypeFont:
     else:
         font = ImageFont.load_default()
 
-    _font_cache[key] = font
+    with _cache_lock:
+        _font_cache[key] = font
     return font
 
 def _get_font_list(size: int, bold: bool = False):
@@ -298,20 +305,33 @@ def _draw_warning_banner(draw: ImageDraw.ImageDraw, x, y, width, text, fonts):
 # ==================== 头像和媒体处理 ====================
 
 async def _download_image(session, url: str) -> Image.Image | None:
-    """异步下载通用图片，复用 session 并防止超大文件"""
-    if not url:
+    """异步下载通用图片，复用 session 并防止超大文件及 SSRF"""
+    if not url or not url.startswith(("http://", "https://")):
+        # 防御 SSRF（禁止访问内网地接/伪协议等）
         return None
+        
     try:
         async with session.get(url) as resp:
             if resp.status == 200:
-                data = await resp.read()
-                if len(data) > 10 * 1024 * 1024:  # 限制最大10MB
+                # 检查响应头声称的大小
+                content_length = resp.headers.get('Content-Length')
+                if content_length and int(content_length) > 10 * 1024 * 1024:
+                    logger.warning(f"[X账号评分] 拒绝下载超大图片(Header大小超标): {url}")
                     return None
+                    
+                # 流式下载检测，防御虚报 Content-Length 的恶意源
+                data = bytearray()
+                async for chunk in resp.content.iter_chunked(65536):
+                    data.extend(chunk)
+                    if len(data) > 10 * 1024 * 1024:
+                        logger.warning(f"[X账号评分] 图片下载超过物理 10MB 限制已中止: {url}")
+                        return None
+                        
                 return Image.open(io.BytesIO(data)).convert("RGBA")
             else:
-                logger.warning(f"图片下载失败 HTTP {resp.status}: {url}")
+                logger.warning(f"[X账号评分] 图片下载失败 HTTP {resp.status}: {url}")
     except Exception as e:
-        logger.debug(f"图片下载异常: {type(e).__name__}: {e}")
+        logger.debug(f"[X账号评分] 图片下载异常: {type(e).__name__}: {e}")
     return None
 
 def _make_circle_avatar(avatar: Image.Image, size: int) -> Image.Image:
@@ -420,12 +440,9 @@ def _draw_sync(data: dict, avatar_img: Image.Image | None, media_imgs: list[Imag
     bio = _strip_emoji(str(data.get("bio", "") or ""))
     user_eval = _strip_emoji(str(data.get("user_eval", "暂无评价") or "暂无评价"))
     gender = data.get("gender", "")
-    avatar_url = data.get("avatar_url", "")
-    media_urls = (data.get("media_urls") or [])[:4]
 
     detail = data.get("score_detail") or {}
     followers = detail.get("followers") or 0
-    following = detail.get("following") or 0
     tweets = detail.get("tweets") or 0
     account_age = detail.get("account_age_years") or 0
     is_verified = detail.get("is_verified", False)
@@ -735,19 +752,23 @@ def _draw_sync(data: dict, avatar_img: Image.Image | None, media_imgs: list[Imag
     img.save(buf, format="PNG", optimize=True)
     return buf.getvalue()
 
-async def render_report(data: dict, blur_media: bool = False) -> bytes:
-    import aiohttp
+async def render_report(session, data: dict, blur_media: bool = False) -> bytes:
     avatar_url = data.get("avatar_url", "")
     media_urls = (data.get("media_urls") or [])[:4]
     
     logger.debug(f"头像: {bool(avatar_url)}, 媒体数: {len(media_urls)}")
     
-    timeout = aiohttp.ClientTimeout(total=30)
-    async with aiohttp.ClientSession(timeout=timeout) as session:
-        tasks = [_download_image(session, avatar_url)]
-        for m_url in media_urls:
-            tasks.append(_download_image(session, m_url))
-        dl_results = await asyncio.gather(*tasks, return_exceptions=True)
+    tasks = [_download_image(session, avatar_url)]
+    for m_url in media_urls:
+        tasks.append(_download_image(session, m_url))
+        
+    dl_results = await asyncio.gather(*tasks, return_exceptions=True)
+    
+    # 增加日志检测异常状况以提升排障能见度
+    for i, res in enumerate(dl_results):
+        if isinstance(res, Exception):
+            url_target = avatar_url if i == 0 else media_urls[i-1]
+            logger.warning(f"[X账号评分] 下载环节发生严重异常 ({url_target}): {type(res).__name__}: {res}")
     
     avatar_img = dl_results[0] if isinstance(dl_results[0], Image.Image) else None
     media_imgs = [m for m in dl_results[1:] if isinstance(m, Image.Image)]
