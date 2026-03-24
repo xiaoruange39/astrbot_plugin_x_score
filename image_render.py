@@ -8,7 +8,7 @@ import re
 import asyncio
 import platform
 import threading
-from PIL import Image, ImageDraw, ImageFont, ImageFilter
+from PIL import Image, ImageDraw, ImageFont, ImageFilter, UnidentifiedImageError
 from astrbot.api import logger
 from .utils import calculate_score_weights
 
@@ -332,7 +332,14 @@ async def _download_image(session, url: str) -> Image.Image | None:
                         logger.warning(f"[X账号评分] 图片下载超过物理 10MB 限制已中止: {url}")
                         return None
                         
-                return Image.open(io.BytesIO(data)).convert("RGBA")
+                try:
+                    return Image.open(io.BytesIO(data)).convert("RGBA")
+                except UnidentifiedImageError:
+                    logger.warning(f"[X账号评分] 无法识别的图片格式: {url}")
+                    return None
+                except Exception as e:
+                    logger.warning(f"[X账号评分] 图片打开失败: {url}, 错误: {e}")
+                    return None
             else:
                 logger.warning(f"[X账号评分] 图片下载失败 HTTP {resp.status}: {url}")
     except Exception as e:
@@ -448,6 +455,7 @@ def _draw_sync(data: dict, avatar_img: Image.Image | None, media_imgs: list[Imag
 
     detail = data.get("score_detail") or {}
     followers = detail.get("followers") or 0
+    following = detail.get("following") or 0
     tweets = detail.get("tweets") or 0
     account_age = detail.get("account_age_years") or 0
     is_verified = detail.get("is_verified", False)

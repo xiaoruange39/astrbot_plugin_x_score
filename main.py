@@ -5,6 +5,7 @@ import base64
 import asyncio
 import aiohttp
 import json
+import tempfile
 from .utils import calculate_score_weights
 from astrbot.api.event import filter, AstrMessageEvent, MessageChain
 from astrbot.api.star import Context, Star, register
@@ -173,7 +174,6 @@ class FljPlugin(Star):
             if message_data[0]["type"] == "text":
                 yield event.plain_result(fallback_text)
             elif message_data[0]["type"] == "image" and img_bytes_cache:
-                import tempfile
                 with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
                     tmp.write(img_bytes_cache)
                     tmp_path = tmp.name
@@ -182,7 +182,6 @@ class FljPlugin(Star):
                     chain = MessageChain([AstrImage.fromFileSystem(tmp_path)])
                     await self.context.send_message(event.unified_msg_origin, chain)
                 finally:
-                    import os
                     if os.path.exists(tmp_path):
                         os.remove(tmp_path)
             else:
