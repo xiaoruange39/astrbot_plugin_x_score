@@ -3,4 +3,4 @@ description: "查询 X/Twitter 账号可信度评分，基于 AI 分析账号真
 author: xiaoruange39
 version: 1.0.0
 display_name: "X账号评分"
-repo: ""
+repo: "https://github.com/xiaoruange39/astrbot_plugin_x_score.git"
