@@ -19,7 +19,7 @@ REQUEST_TIMEOUT = 60  # flj.info 分析通常需要 20-30 秒
 CACHE_TTL = 300  # 缓存 5 分钟
 
 
-@register("astrbot_plugin_x_score", "X账号评分", "查询 X/Twitter 账号可信度评分", "1.1.2")
+@register("astrbot_plugin_x_score", "X账号评分", "查询 X/Twitter 账号可信度评分", "1.2.0")
 class FljPlugin(Star):
     """X账号评分插件 - 查询 X/Twitter 账号可信度评分"""
 
@@ -66,7 +66,7 @@ class FljPlugin(Star):
         try:
             data = await self._fetch_verify(username)
         except aiohttp.ClientResponseError as e:
-            logger.error(f"请求 flj.info API 失败: {e.status}, message='{e.message}'")
+            logger.error(f"[X账号评分] API 请求失败: HTTP {e.status}")
             if e.status == 429:
                 yield event.plain_result(
                     "🚦 当前访问量过大\n"
@@ -77,7 +77,7 @@ class FljPlugin(Star):
                 yield event.plain_result(f"❌ 网络请求失败 ({e.status})，请稍后重试。")
             return
         except aiohttp.ClientError as e:
-            logger.error(f"请求 flj.info API 失败: {e}")
+            logger.error(f"[X账号评分] 网络异常: {type(e).__name__}")
             yield event.plain_result("❌ 网络请求失败，请稍后重试。")
             return
         except TimeoutError:
@@ -90,41 +90,52 @@ class FljPlugin(Star):
             )
             return
 
-        # 生成图片
-        try:
-            img_bytes = await render_report(data)
-        except Exception as e:
-            logger.error(f"生成报告图片失败: {e}")
-            yield event.plain_result(self._format_result(data))
-            return
+        # 根据配置选择输出模式
+        output_mode = self.config.get("output_mode", "图片")
+        
+        message_data = None
+        img_path = None
+        
+        if output_mode == "文字":
+            text_result = self._format_result(data)
+            message_data = [{"type": "text", "data": {"text": text_result}}]
+            fallback_text = text_result
+        else:
+            # 图片模式
+            blur_media = self.config.get("blur_media", False)
+            try:
+                img_bytes = await render_report(data, blur_media=blur_media)
+                tmp_dir = os.path.join(
+                    os.path.dirname(os.path.abspath(__file__)), "..", "..", "temp"
+                )
+                os.makedirs(tmp_dir, exist_ok=True)
+                img_path = os.path.join(tmp_dir, f"x_score_{username}_{int(time.time())}.png")
+                with open(img_path, "wb") as f:
+                    f.write(img_bytes)
+                logger.debug(f"[X账号评分] 临时图片: {img_path}")
+                
+                with open(img_path, "rb") as f:
+                    img_base64 = base64.b64encode(f.read()).decode('utf-8')
+                message_data = [{"type": "image", "data": {"file": f"base64://{img_base64}"}}]
+            except Exception as e:
+                logger.error(f"[X账号评分] 图片渲染失败: {type(e).__name__}: {e}")
+                text_result = self._format_result(data)
+                message_data = [{"type": "text", "data": {"text": text_result}}]
+                fallback_text = text_result
 
-        # 保存图片到临时文件
-        tmp_dir = os.path.join(
-            os.path.dirname(os.path.abspath(__file__)), "..", "..", "temp"
-        )
-        os.makedirs(tmp_dir, exist_ok=True)
-        img_path = os.path.join(tmp_dir, f"x_score_{username}_{int(time.time())}.png")
-        with open(img_path, "wb") as f:
-            f.write(img_bytes)
-        logger.info(f"图片已保存到临时路径: {img_path}")
-
-        # 发送图片并处理撤回
+        # 发送并处理撤回
         recall_delay = self.config.get("recall_delay", 0)
         
         # 针对 aiocqhttp 平台使用更底层的 API 以确保获取 message_id 用于撤回
         if event.get_platform_name() == "aiocqhttp" and isinstance(event, AiocqhttpMessageEvent):
             try:
                 client = event.bot
-                with open(img_path, "rb") as f:
-                    img_base64 = base64.b64encode(f.read()).decode('utf-8')
-                
-                message = [{"type": "image", "data": {"file": f"base64://{img_base64}"}}]
                 group_id = event.get_group_id()
                 
                 if group_id:
-                    resp = await client.send_group_msg(group_id=int(group_id), message=message)
+                    resp = await client.send_group_msg(group_id=int(group_id), message=message_data)
                 else:
-                    resp = await client.send_private_msg(user_id=int(event.get_sender_id()), message=message)
+                    resp = await client.send_private_msg(user_id=int(event.get_sender_id()), message=message_data)
                 
                 if resp and isinstance(resp, dict) and resp.get("message_id"):
                     msg_id = resp["message_id"]
@@ -137,20 +148,20 @@ class FljPlugin(Star):
                                 pass
                         asyncio.create_task(do_recall(msg_id))
                     
-                    # 发送成功后删除本地临时图片
-                    if os.path.exists(img_path):
+                    if img_path and os.path.exists(img_path):
                         os.remove(img_path)
                     return 
             except Exception as e:
-                logger.error(f"专属发送异常: {e}")
+                logger.error(f"[X账号评分] 平台发送异常: {type(e).__name__}: {e}")
 
         # 回退到通用发送方式
-        chain = MessageChain([AstrImage.fromFileSystem(img_path)])
-        await self.context.send_message(event.unified_msg_origin, chain)
-        
-        # 发送结束后清理图片
-        if os.path.exists(img_path):
-            os.remove(img_path)
+        if message_data[0]["type"] == "text":
+            yield event.plain_result(fallback_text)
+        else:
+            chain = MessageChain([AstrImage.fromFileSystem(img_path)])
+            await self.context.send_message(event.unified_msg_origin, chain)
+            if img_path and os.path.exists(img_path):
+                os.remove(img_path)
 
     async def _fetch_verify(self, username: str) -> dict:
         """调用 flj.info 验证接口，带缓存和并发去重"""
@@ -160,14 +171,14 @@ class FljPlugin(Star):
         if key in self._cache:
             ts, data = self._cache[key]
             if time.time() - ts < CACHE_TTL:
-                logger.info(f"命中缓存: @{username}")
+                logger.debug(f"[X账号评分] 缓存命中: @{username}")
                 return data
             else:
                 del self._cache[key]
         
         # 2. 并发去重：如果已有相同请求在进行中，等待其结果
         if key in self._pending:
-            logger.info(f"等待已有请求: @{username}")
+            logger.debug(f"[X账号评分] 合并请求: @{username}")
             return await self._pending[key]
         
         # 3. 发起新请求
@@ -182,10 +193,14 @@ class FljPlugin(Star):
                 "source": "search",
             }
             timeout = aiohttp.ClientTimeout(total=REQUEST_TIMEOUT)
+            logger.info(f"[X账号评分] 查询 @{username}")
             async with aiohttp.ClientSession(timeout=timeout) as session:
                 async with session.get(FLJ_VERIFY_URL, params=params) as resp:
                     resp.raise_for_status()
                     data = await resp.json()
+            
+            score = data.get("score", "?")
+            logger.info(f"[X账号评分] @{username} 评分: {score}")
             
             # 写入缓存
             self._cache[key] = (time.time(), data)
@@ -198,27 +213,157 @@ class FljPlugin(Star):
             self._pending.pop(key, None)
 
     def _format_result(self, data: dict) -> str:
-        """纯文本格式（图片生成失败时的回退方案）"""
+        """纯文本格式（完整版，与图片版内容一致）"""
         score = data.get("score", "N/A")
         display_name = data.get("display_name", "未知")
         username = data.get("twitter_username", "未知")
         user_eval = str(data.get("user_eval", "暂无评价") or "暂无评价")
-        
+        bio = str(data.get("bio", "") or "")
+        gender = data.get("gender", "")
+
         detail = data.get("score_detail") or {}
-        followers = detail.get("followers", 0)
-        account_age = detail.get("account_age_years", 0)
+        followers = detail.get("followers") or 0
+        following = detail.get("following") or 0
+        tweets = detail.get("tweets") or 0
+        account_age = detail.get("account_age_years") or 0
+        is_verified = detail.get("is_verified", False)
+        is_welfare = detail.get("is_welfare", False)
+        is_active = detail.get("is_active", False)
+        engagement = detail.get("engagement") or ""
+        positives = detail.get("positives") or 0
+        complaints = detail.get("complaints") or 0
+        pinned_has_url = detail.get("pinned_tweet_has_url", False)
+        location = str(detail.get("location", "") or "")
+        primary_language = str(detail.get("primary_language", "") or "")
+        account_tags = detail.get("account_tags") or []
+
+        negative_tags = [str(t) for t in (data.get("negative_tags") or [])]
+        positive_tags = [str(t) for t in (data.get("positive_tags") or [])]
+        is_fushi = data.get("is_fushi", False)
+        has_threshold = data.get("has_threshold", False)
+
+        pos_examples = data.get("positive_examples") or []
+        neg_examples = data.get("complaint_examples") or []
+
+        # 评分等级
+        if isinstance(score, (int, float)):
+            if score >= 90: level = "极为可信"
+            elif score >= 75: level = "较为可信"
+            elif score >= 60: level = "一般可信"
+            elif score >= 40: level = "可信度低"
+            else: level = "风险较高"
+        else:
+            level = "未知"
+
+        # 标签
+        tags = []
+        tags.append("活跃" if is_active else "不活跃")
+        if gender:
+            g_text = {"male": "♂男", "female": "♀女"}.get(gender, gender)
+            tags.append(g_text)
+        if location: tags.append(location)
+        if primary_language: tags.append(primary_language)
+        if is_verified: tags.append("✓已认证")
+        if is_welfare: tags.append("福利号")
+        if is_fushi: tags.append("付费")
+        if has_threshold: tags.append("有门槛")
+        for t in account_tags: tags.append(str(t))
+        for t in positive_tags: tags.append(str(t))
+        for t in negative_tags: tags.append(str(t))
 
         lines = [
             f"📊 X 账号可信度报告",
+            f"━━━━━━━━━━━━━━━━━━",
             f"👤 {display_name} (@{username})",
-            f"🎯 评分：{score}/100",
-            f"👥 粉丝：{self._fmt_num(followers)} | 账龄：{account_age:.1f}年",
+            f"🎯 评分：{score}/100（{level}）",
             f"",
-            f"🤖 AI 评价：",
-            user_eval[:200] + ("..." if len(user_eval) > 200 else ""),
-            f"",
-            f"🔗 {FLJ_WEB_URL}/{username}",
+            f"📋 {' | '.join(tags)}",
         ]
+
+        if bio:
+            lines.append(f"📝 {bio[:150]}{'...' if len(bio) > 150 else ''}")
+
+        lines.extend([
+            f"",
+            f"👥 粉丝 {self._fmt_num(followers)} | 关注 {self._fmt_num(following)} | 推文 {self._fmt_num(tweets)} | 账龄 {account_age:.1f}年",
+        ])
+
+        # 评分明细
+        eng_labels = {"high": "高", "medium": "中", "low": "低"}
+        eng_level = eng_labels.get(engagement, "")
+        
+        # 计算各项分数（与图片版逻辑一致）
+        b_age = min(25, int(account_age * 1.5))
+        if followers > 1000000: b_fol = 20
+        elif followers > 100000: b_fol = 15
+        elif followers > 10000: b_fol = 10
+        else: b_fol = 5
+        if tweets > 10000: b_twt = 8
+        elif tweets > 1000: b_twt = 5
+        else: b_twt = 2
+        b_ver = 10 if is_verified else 0
+        b_act = 5 if is_active else 0
+        if engagement == "high": b_eng = 8
+        elif engagement == "medium": b_eng = 5
+        else: b_eng = 2
+        if positives >= 10: b_pos = 10
+        elif positives >= 5: b_pos = 8
+        elif positives >= 1: b_pos = 5
+        else: b_pos = 0
+        if complaints >= 5: b_neg = -15
+        elif complaints >= 3: b_neg = -10
+        elif complaints >= 1: b_neg = -5
+        else: b_neg = 0
+        b_pin = -10 if pinned_has_url else 0
+        
+        age_label = f"{account_age:.1f}年" if account_age > 0 else "未知"
+        pos_label = f"×{positives}" if positives > 0 else ""
+        eng_display = f"（{eng_level}）" if eng_level else ""
+
+        def _pts(v):
+            return f"+{v}" if v > 0 else str(v)
+
+        lines.extend([
+            f"",
+            f"📊 评分明细",
+            f"  基础分　　　　　{_pts(20)}",
+            f"  账号寿命（{age_label}）　{_pts(b_age)}",
+            f"  粉丝量（{self._fmt_num(followers)}）　{_pts(b_fol)}",
+            f"  发帖量（{self._fmt_num(tweets)}）　{_pts(b_twt)}",
+            f"  蓝V认证　　　　{_pts(b_ver)}",
+            f"  近期活跃发帖　　{_pts(b_act)}",
+            f"  互动活跃度{eng_display}　{_pts(b_eng)}",
+            f"  正面好评{pos_label}　　{_pts(b_pos)}",
+            f"  负面评价　　　　{_pts(b_neg)}",
+            f"  置顶推含外链　　{_pts(b_pin)}",
+        ])
+
+        # AI 评价
+        lines.extend([
+            f"",
+            f"🤖 AI 可信度评价：",
+            user_eval[:300] + ("..." if len(user_eval) > 300 else ""),
+        ])
+
+        # 正面评价
+        if pos_examples:
+            lines.append(f"")
+            lines.append(f"👍 正面评价：")
+            for ex in pos_examples[:5]:
+                lines.append(f'  "{str(ex)[:100]}"')
+
+        # 负面评价
+        if neg_examples:
+            lines.append(f"")
+            lines.append(f"🚨 负面评价：")
+            for ex in neg_examples[:5]:
+                lines.append(f'  "{str(ex)[:100]}"')
+
+        lines.extend([
+            f"",
+            f"⚠ 检索结果仅供参考",
+            f"🔗 {FLJ_WEB_URL}/{username}",
+        ])
         return "\n".join(lines)
 
     @staticmethod

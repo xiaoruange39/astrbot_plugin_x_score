@@ -5,8 +5,11 @@
 import io
 import os
 import re
+import logging
 import platform
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw, ImageFont, ImageFilter
+
+logger = logging.getLogger("X账号评分")
 
 # ==================== 颜色常量 ====================
 BG_COLOR = (10, 10, 10)           # 主背景 #0a0a0a
@@ -307,9 +310,9 @@ async def _download_image(url: str, timeout_sec: int = 30) -> Image.Image | None
                     data = await resp.read()
                     return Image.open(io.BytesIO(data)).convert("RGBA")
                 else:
-                    print(f"[X账号评分] 图片下载失败 HTTP {resp.status}: {url}")
+                    logger.warning(f"图片下载失败 HTTP {resp.status}: {url}")
     except Exception as e:
-        print(f"[X账号评分] 图片下载异常: {url} - {type(e).__name__}: {e}")
+        logger.debug(f"图片下载异常: {type(e).__name__}: {e}")
     return None
 
 def _make_circle_avatar(avatar: Image.Image, size: int) -> Image.Image:
@@ -405,7 +408,7 @@ def _calculate_score_breakdown(score: int, detail: dict, data: dict | None = Non
 
 # ==================== 主渲染函数 ====================
 
-async def render_report(data: dict) -> bytes:
+async def render_report(data: dict, blur_media: bool = False) -> bytes:
     import asyncio
     
     score = data.get("score", 0)
@@ -457,7 +460,7 @@ async def render_report(data: dict) -> bytes:
     card_content_w = content_w - 2 * CARD_PADDING
 
     # ==================== 下载资源 ====================
-    print(f"[X账号评分] avatar_url={avatar_url}, media_urls={media_urls}")
+    logger.debug(f"头像: {bool(avatar_url)}, 媒体数: {len(media_urls)}")
     tasks = [_download_image(avatar_url)]
     for m_url in media_urls:
         tasks.append(_download_image(m_url))
@@ -674,6 +677,10 @@ async def render_report(data: dict) -> bytes:
             w, h = m_img.size
             s = min(w, h)
             m_img = m_img.crop(((w-s)//2, (h-s)//2, (w+s)//2, (h+s)//2)).resize((grid_size, grid_size), Image.Resampling.LANCZOS)
+            
+            # 模糊打码处理
+            if blur_media:
+                m_img = m_img.filter(ImageFilter.GaussianBlur(radius=20))
             
             mask = Image.new("L", (grid_size, grid_size), 0)
             ImageDraw.Draw(mask).rounded_rectangle((0, 0, grid_size, grid_size), radius=16, fill=255)
