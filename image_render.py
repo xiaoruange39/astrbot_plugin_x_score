@@ -5,11 +5,11 @@
 import io
 import os
 import re
-import logging
+import asyncio
 import platform
+import urllib.parse
 from PIL import Image, ImageDraw, ImageFont, ImageFilter
-
-logger = logging.getLogger("X账号评分")
+from astrbot.api import logger
 
 # ==================== 颜色常量 ====================
 BG_COLOR = (10, 10, 10)           # 主背景 #0a0a0a
@@ -225,7 +225,6 @@ def _strip_emoji(text: str) -> str:
         result.append(char)
     # 清理多余空格
     cleaned = ''.join(result)
-    import re
     cleaned = re.sub(r'  +', ' ', cleaned).strip()
     return cleaned
 
@@ -408,8 +407,8 @@ def _calculate_score_breakdown(score: int, detail: dict, data: dict | None = Non
 
 # ==================== 主渲染函数 ====================
 
-async def render_report(data: dict, blur_media: bool = False) -> bytes:
-    import asyncio
+def _draw_sync(data: dict, avatar_img: Image.Image | None, media_imgs: list[Image.Image], blur_media: bool) -> bytes:
+    """同步的 PIL 绘制逻辑，应在后台线程执行以防阻塞"""
     
     score = data.get("score", 0)
     display_name = _strip_emoji(str(data.get("display_name", "未知") or "未知"))
@@ -458,16 +457,6 @@ async def render_report(data: dict, blur_media: bool = False) -> bytes:
     tmp_draw = ImageDraw.Draw(tmp_img)
     content_w = IMG_WIDTH - 2 * PADDING
     card_content_w = content_w - 2 * CARD_PADDING
-
-    # ==================== 下载资源 ====================
-    logger.debug(f"头像: {bool(avatar_url)}, 媒体数: {len(media_urls)}")
-    tasks = [_download_image(avatar_url)]
-    for m_url in media_urls:
-        tasks.append(_download_image(m_url))
-    dl_results = await asyncio.gather(*tasks, return_exceptions=True)
-    
-    avatar_img = dl_results[0] if isinstance(dl_results[0], Image.Image) else None
-    media_imgs = [m for m in dl_results[1:] if isinstance(m, Image.Image)]
 
     cx_base = PADDING + CARD_PADDING
     score_box_x_base = IMG_WIDTH - PADDING - CARD_PADDING - SCORE_BOX_SIZE
@@ -741,3 +730,19 @@ async def render_report(data: dict, blur_media: bool = False) -> bytes:
     buf = io.BytesIO()
     img.save(buf, format="PNG", optimize=True)
     return buf.getvalue()
+
+async def render_report(data: dict, blur_media: bool = False) -> bytes:
+    avatar_url = data.get("avatar_url", "")
+    media_urls = (data.get("media_urls") or [])[:4]
+    
+    logger.debug(f"头像: {bool(avatar_url)}, 媒体数: {len(media_urls)}")
+    
+    tasks = [_download_image(avatar_url)]
+    for m_url in media_urls:
+        tasks.append(_download_image(m_url))
+    dl_results = await asyncio.gather(*tasks, return_exceptions=True)
+    
+    avatar_img = dl_results[0] if isinstance(dl_results[0], Image.Image) else None
+    media_imgs = [m for m in dl_results[1:] if isinstance(m, Image.Image)]
+    
+    return await asyncio.to_thread(_draw_sync, data, avatar_img, media_imgs, blur_media)

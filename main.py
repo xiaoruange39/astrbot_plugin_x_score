@@ -28,6 +28,7 @@ class FljPlugin(Star):
         self.config = config
         self._cache: dict[str, tuple[float, dict]] = {}  # username -> (timestamp, data)
         self._pending: dict[str, asyncio.Future] = {}  # username -> Future (并发去重)
+        self._recall_tasks = set()  # 保存 asyncio.Task 强引用避免 GC 被意外回收
 
     @filter.command("X账号评分")
     async def query_x_account(self, event: AstrMessageEvent):
@@ -105,17 +106,7 @@ class FljPlugin(Star):
             blur_media = self.config.get("blur_media", False)
             try:
                 img_bytes = await render_report(data, blur_media=blur_media)
-                tmp_dir = os.path.join(
-                    os.path.dirname(os.path.abspath(__file__)), "..", "..", "temp"
-                )
-                os.makedirs(tmp_dir, exist_ok=True)
-                img_path = os.path.join(tmp_dir, f"x_score_{username}_{int(time.time())}.png")
-                with open(img_path, "wb") as f:
-                    f.write(img_bytes)
-                logger.debug(f"[X账号评分] 临时图片: {img_path}")
-                
-                with open(img_path, "rb") as f:
-                    img_base64 = base64.b64encode(f.read()).decode('utf-8')
+                img_base64 = base64.b64encode(img_bytes).decode('utf-8')
                 message_data = [{"type": "image", "data": {"file": f"base64://{img_base64}"}}]
             except Exception as e:
                 logger.error(f"[X账号评分] 图片渲染失败: {type(e).__name__}: {e}")
@@ -146,22 +137,34 @@ class FljPlugin(Star):
                                 await client.api.call_action("delete_msg", message_id=m_id)
                             except Exception:
                                 pass
-                        asyncio.create_task(do_recall(msg_id))
+                        
+                        task = asyncio.create_task(do_recall(msg_id))
+                        self._recall_tasks.add(task)
+                        task.add_done_callback(self._recall_tasks.discard)
                     
-                    if img_path and os.path.exists(img_path):
-                        os.remove(img_path)
                     return 
             except Exception as e:
                 logger.error(f"[X账号评分] 平台发送异常: {type(e).__name__}: {e}")
-
         # 回退到通用发送方式
         if message_data[0]["type"] == "text":
             yield event.plain_result(fallback_text)
         else:
-            chain = MessageChain([AstrImage.fromFileSystem(img_path)])
-            await self.context.send_message(event.unified_msg_origin, chain)
-            if img_path and os.path.exists(img_path):
-                os.remove(img_path)
+            # 对于不支持高阶 API 直接发送 base64 的通用平台，使用传统本地文件方式保证兼容性
+            import tempfile
+            img_data = base64.b64decode(message_data[0]["data"]["file"].replace("base64://", ""))
+            with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
+                tmp.write(img_data)
+                tmp_path = tmp.name
+                
+            try:
+                chain = MessageChain([AstrImage.fromFileSystem(tmp_path)])
+                await self.context.send_message(event.unified_msg_origin, chain)
+            except Exception as e:
+                logger.error(f"[X账号评分] 通用发送异常: {type(e).__name__}: {e}")
+                yield event.plain_result(fallback_text)
+            finally:
+                if os.path.exists(tmp_path):
+                    os.remove(tmp_path)
 
     async def _fetch_verify(self, username: str) -> dict:
         """调用 flj.info 验证接口，带缓存和并发去重"""
@@ -182,7 +185,7 @@ class FljPlugin(Star):
             return await self._pending[key]
         
         # 3. 发起新请求
-        fut: asyncio.Future = asyncio.get_event_loop().create_future()
+        fut: asyncio.Future = asyncio.get_running_loop().create_future()
         self._pending[key] = fut
         
         try:
