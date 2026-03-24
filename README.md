@@ -1,5 +1,3 @@
-![:name](https://count.getloli.com/@astrbot_plugin_x_score?name=astrbot_plugin_x_score&theme=green&padding=7&offset=0&align=top&scale=1&pixelated=1&darkmode=auto&prefix=0)
-
 # X账号评分 - AstrBot 插件
 
 查询 X(Twitter) 账号可信度评分，基于 [flj.info](https://flj.info) 的 AI 分析。

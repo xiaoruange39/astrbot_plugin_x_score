@@ -294,8 +294,10 @@ def _draw_warning_banner(draw: ImageDraw.ImageDraw, x, y, width, text, fonts):
 
 # ==================== 头像和媒体处理 ====================
 
-async def _download_image(url: str, timeout_sec: int = 10) -> Image.Image | None:
+async def _download_image(url: str, timeout_sec: int = 30) -> Image.Image | None:
     """异步下载通用图片"""
+    if not url:
+        return None
     import aiohttp
     try:
         timeout = aiohttp.ClientTimeout(total=timeout_sec)
@@ -304,8 +306,10 @@ async def _download_image(url: str, timeout_sec: int = 10) -> Image.Image | None
                 if resp.status == 200:
                     data = await resp.read()
                     return Image.open(io.BytesIO(data)).convert("RGBA")
-    except Exception:
-        pass
+                else:
+                    print(f"[X账号评分] 图片下载失败 HTTP {resp.status}: {url}")
+    except Exception as e:
+        print(f"[X账号评分] 图片下载异常: {url} - {type(e).__name__}: {e}")
     return None
 
 def _make_circle_avatar(avatar: Image.Image, size: int) -> Image.Image:
@@ -318,12 +322,17 @@ def _make_circle_avatar(avatar: Image.Image, size: int) -> Image.Image:
     result.paste(avatar, (0, 0), mask)
     return result
 
-def _calculate_score_breakdown(score: int, detail: dict) -> list:
+def _calculate_score_breakdown(score: int, detail: dict, data: dict | None = None) -> list:
     """逆推并分配分数明细，确保总和等于 score"""
+    if data is None:
+        data = {}
     age = detail.get("account_age_years") or 0
     fols = detail.get("followers") or 0
     twts = detail.get("tweets") or 0
     eng = detail.get("engagement") or ""
+    positives = detail.get("positives") or 0
+    complaints = detail.get("complaints") or 0
+    pinned_has_url = detail.get("pinned_tweet_has_url", False)
     
     b_age = min(25, int(age * 1.5))
     if fols > 1000000: b_fol = 20
@@ -342,18 +351,57 @@ def _calculate_score_breakdown(score: int, detail: dict) -> list:
     elif eng == "medium": b_eng = 5
     else: b_eng = 2
     
-    diff = score - (20 + b_age + b_fol + b_twt + b_ver + b_act + b_eng)
+    # 正面好评分数
+    if positives >= 10: b_pos = 10
+    elif positives >= 5: b_pos = 8
+    elif positives >= 1: b_pos = 5
+    else: b_pos = 0
     
-    return [
+    # 负面评价扣分
+    if complaints >= 5: b_neg = -15
+    elif complaints >= 3: b_neg = -10
+    elif complaints >= 1: b_neg = -5
+    else: b_neg = 0
+    
+    # 置顶推含外链扣分
+    b_pin = -10 if pinned_has_url else 0
+    
+    # 计算差值
+    allocated = 20 + b_age + b_fol + b_twt + b_ver + b_act + b_eng + b_pos + b_neg + b_pin
+    diff = score - allocated
+    
+    # 账号寿命展示
+    if age > 0:
+        age_label = f"• 账号寿命（{age:.1f}年）"
+    else:
+        age_label = "• 账号寿命（未知）"
+    
+    # 互动活跃度展示等级
+    eng_labels = {"high": "高", "medium": "中", "low": "低"}
+    eng_level = eng_labels.get(eng, "")
+    eng_text = f"• 互动活跃度（{eng_level}）" if eng_level else "• 互动活跃度"
+    
+    # 正面好评展示数量
+    pos_text = f"• 正面好评 x{positives}" if positives > 0 else "• 正面好评"
+    
+    items = [
         ("• 基础分", 20),
-        (f"• 账号寿命（{age:.1f}年）", b_age),
+        (age_label, b_age),
         (f"• 粉丝量（{_format_number(fols)}）", b_fol),
         (f"• 发帖量（{_format_number(twts)}）", b_twt),
         ("• 蓝V认证", b_ver),
         ("• 近期活跃发帖", b_act),
-        ("• 互动活跃度", b_eng),
-        ("• 其它加分" if diff >= 0 else "• 风险扣分", diff)
+        (eng_text, b_eng),
+        (pos_text, b_pos),
+        ("• 负面评价", b_neg),
+        ("• 置顶推含外链", b_pin),
     ]
+    
+    # 仅当有未分配的差值时才显示
+    if diff != 0:
+        items.append(("• 其它加分" if diff >= 0 else "• 风险扣分", diff))
+    
+    return items
 
 # ==================== 主渲染函数 ====================
 
@@ -409,6 +457,7 @@ async def render_report(data: dict) -> bytes:
     card_content_w = content_w - 2 * CARD_PADDING
 
     # ==================== 下载资源 ====================
+    print(f"[X账号评分] avatar_url={avatar_url}, media_urls={media_urls}")
     tasks = [_download_image(avatar_url)]
     for m_url in media_urls:
         tasks.append(_download_image(m_url))
@@ -467,7 +516,7 @@ async def render_report(data: dict) -> bytes:
     
     # 计算警告横幅高度 (动态)
     warning_h = 0
-    show_warning = "日" in primary_language or "Japanese" in primary_language
+    show_warning = True  # 始终显示检测结果仅供参考
     warning_text = "检索结果仅供参考，存在漏网之鱼。建议自行查看该账号 IP 属地——若内容全为日语却使用 VPN，极有可能是诈骗账号。"
     if show_warning:
         max_text_width = card_content_w - 48 - 24
@@ -489,7 +538,7 @@ async def render_report(data: dict) -> bytes:
     col_w = (content_w - 24) // 2
     grid_size = (col_w - 36*2 - 16) // 2
     media_grid_h = 100 + (2 * (grid_size + 16)) + 36 # approx
-    mid_card_h = max(100 + 8*44, media_grid_h)  # 取较高者，大概480px
+    mid_card_h = max(100 + 11*44, media_grid_h)  # 取较高者，最多11项评分明细
 
     # AI 评价卡片高度
     eval_lines = _wrap_text(tmp_draw, user_eval, fl_body, card_content_w - SAFE_RIGHT_MARGIN)[:12] if user_eval else []
@@ -592,11 +641,9 @@ async def render_report(data: dict) -> bytes:
     _rounded_rect(draw, (PADDING, y, PADDING + col_w, y + int(mid_card_h)), CARD_RADIUS, fill=CARD_BG, outline=CARD_BORDER, width=2)
     _draw_text_fallback(draw, (PADDING + 36, y + 36), "评分明细", TEXT_WHITE, fl_section)
     
-    breakdown = _calculate_score_breakdown(score, detail)
+    breakdown = _calculate_score_breakdown(score, detail, data)
     by = y + 100
     for title, pts in breakdown:
-        if pts == 0 and "扣分" not in title and "加分" not in title:
-            continue  
         
         clean_title = _strip_emoji(title).strip()
         pts_str = f"+{pts}" if pts > 0 else str(pts)

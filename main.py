@@ -1,14 +1,12 @@
 import os
+import re
 import time
-import tempfile
+import base64
+import asyncio
 import aiohttp
 from astrbot.api.event import filter, AstrMessageEvent, MessageChain
 from astrbot.api.star import Context, Star, register
 from astrbot.api.message_components import Image as AstrImage
-from astrbot.api import logger
-import base64
-import asyncio
-from typing import List
 from astrbot.api import logger, AstrBotConfig
 from astrbot.core.platform.sources.aiocqhttp.aiocqhttp_message_event import AiocqhttpMessageEvent
 
@@ -18,6 +16,7 @@ FLJ_API_BASE = "https://flj.info/api"
 FLJ_VERIFY_URL = f"{FLJ_API_BASE}/verify"
 FLJ_WEB_URL = "https://flj.info/verify"
 REQUEST_TIMEOUT = 60  # flj.info 分析通常需要 20-30 秒
+CACHE_TTL = 300  # 缓存 5 分钟
 
 
 @register("astrbot_plugin_x_score", "X账号评分", "查询 X/Twitter 账号可信度评分", "1.1.2")
@@ -27,6 +26,8 @@ class FljPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
         self.config = config
+        self._cache: dict[str, tuple[float, dict]] = {}  # username -> (timestamp, data)
+        self._pending: dict[str, asyncio.Future] = {}  # username -> Future (并发去重)
 
     @filter.command("X账号评分")
     async def query_x_account(self, event: AstrMessageEvent):
@@ -51,7 +52,6 @@ class FljPlugin(Star):
         # 去除可能带有的 @ 前缀
         username = username.lstrip("@")
 
-        import re
         if not re.match(r"^[A-Za-z0-9_]{1,15}$", username):
             yield event.plain_result(
                 f"❌ 用户名格式错误: '{username}'\n"
@@ -153,18 +153,49 @@ class FljPlugin(Star):
             os.remove(img_path)
 
     async def _fetch_verify(self, username: str) -> dict:
-        """调用 flj.info 验证接口"""
-        params = {
-            "username": username,
-            "t": str(int(time.time() * 1000)),
-            "lang": "zh",
-            "source": "search",
-        }
-        timeout = aiohttp.ClientTimeout(total=REQUEST_TIMEOUT)
-        async with aiohttp.ClientSession(timeout=timeout) as session:
-            async with session.get(FLJ_VERIFY_URL, params=params) as resp:
-                resp.raise_for_status()
-                return await resp.json()
+        """调用 flj.info 验证接口，带缓存和并发去重"""
+        key = username.lower()
+        
+        # 1. 检查缓存
+        if key in self._cache:
+            ts, data = self._cache[key]
+            if time.time() - ts < CACHE_TTL:
+                logger.info(f"命中缓存: @{username}")
+                return data
+            else:
+                del self._cache[key]
+        
+        # 2. 并发去重：如果已有相同请求在进行中，等待其结果
+        if key in self._pending:
+            logger.info(f"等待已有请求: @{username}")
+            return await self._pending[key]
+        
+        # 3. 发起新请求
+        fut: asyncio.Future = asyncio.get_event_loop().create_future()
+        self._pending[key] = fut
+        
+        try:
+            params = {
+                "username": username,
+                "t": str(int(time.time() * 1000)),
+                "lang": "zh",
+                "source": "search",
+            }
+            timeout = aiohttp.ClientTimeout(total=REQUEST_TIMEOUT)
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.get(FLJ_VERIFY_URL, params=params) as resp:
+                    resp.raise_for_status()
+                    data = await resp.json()
+            
+            # 写入缓存
+            self._cache[key] = (time.time(), data)
+            fut.set_result(data)
+            return data
+        except Exception as e:
+            fut.set_exception(e)
+            raise
+        finally:
+            self._pending.pop(key, None)
 
     def _format_result(self, data: dict) -> str:
         """纯文本格式（图片生成失败时的回退方案）"""
