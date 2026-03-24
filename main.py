@@ -418,14 +418,15 @@ class FljPlugin(Star):
     async def terminate(self):
         """生命周期结束时的清理工作，释放连接池和回收挂起的任务"""
         if self._session and not self._session.closed:
-            asyncio.create_task(self._session.close())
+            await self._session.close()
         
         # 稳妥地清理正在排队或挂起的任务
+        tasks_to_cancel = []
         for t in self._pending.values():
             if not t.done():
                 t.cancel()
+                tasks_to_cancel.append(t)
         
-        tasks_to_cancel = []
         for t in self._recall_tasks:
             if not t.done():
                 t.cancel()

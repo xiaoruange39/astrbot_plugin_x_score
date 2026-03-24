@@ -12,12 +12,21 @@ def calculate_score_weights(
     """
     统一的评分明细测算函数，确保文本模板与图片展现双端一致
     """
-    # 边界下限防护
-    account_age_years = max(0.0, account_age_years)
-    followers = max(0, followers)
-    tweets = max(0, tweets)
-    positives = max(0, positives)
-    complaints = max(0, complaints)
+    # 强制数值类型转换防护 (防止 API Drift 传入字符串/None)
+    try: account_age_years = max(0.0, float(account_age_years or 0))
+    except (ValueError, TypeError): account_age_years = 0.0
+    
+    try: followers = max(0, int(followers or 0))
+    except (ValueError, TypeError): followers = 0
+    
+    try: tweets = max(0, int(tweets or 0))
+    except (ValueError, TypeError): tweets = 0
+    
+    try: positives = max(0, int(positives or 0))
+    except (ValueError, TypeError): positives = 0
+    
+    try: complaints = max(0, int(complaints or 0))
+    except (ValueError, TypeError): complaints = 0
 
     b_age = min(25, int(account_age_years * 1.5))
     

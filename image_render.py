@@ -306,8 +306,13 @@ def _draw_warning_banner(draw: ImageDraw.ImageDraw, x, y, width, text, fonts):
 
 async def _download_image(session, url: str) -> Image.Image | None:
     """异步下载通用图片，复用 session 并防止超大文件及 SSRF"""
-    if not url or not url.startswith(("http://", "https://")):
-        # 防御 SSRF（禁止访问内网地接/伪协议等）
+    if not url:
+        return None
+        
+    import urllib.parse
+    parsed = urllib.parse.urlparse(url)
+    if parsed.scheme not in ('http', 'https') or parsed.hostname not in ('pbs.twimg.com', 'video.twimg.com', 'abs.twimg.com'):
+        logger.warning(f"[X账号评分] SSRF 防御拦截 - 尝试访问非白名单域名: {url}")
         return None
         
     try:
