@@ -4,6 +4,8 @@ import time
 import base64
 import asyncio
 import aiohttp
+import json
+from .utils import calculate_score_weights
 from astrbot.api.event import filter, AstrMessageEvent, MessageChain
 from astrbot.api.star import Context, Star, register
 from astrbot.api.message_components import Image as AstrImage
@@ -83,12 +85,20 @@ class FljPlugin(Star):
             else:
                 yield event.plain_result(f"❌ 网络请求失败 ({e.status})，请稍后重试。")
             return
+        except (TimeoutError, asyncio.TimeoutError):
+            yield event.plain_result("❌ 请求超时（分析通常需要20-30秒），请稍后重试。")
+            return
+        except json.JSONDecodeError:
+            logger.error("[X账号评分] API 返回的数据格式异常(非 JSON)")
+            yield event.plain_result("❌ API 接口返回异常格式。")
+            return
+        except aiohttp.client_exceptions.ContentTypeError:
+            logger.error("[X账号评分] API 返回的 Content-Type 异常")
+            yield event.plain_result("❌ 远程接口维护中或网关故障(502/503)。")
+            return
         except aiohttp.ClientError as e:
             logger.error(f"[X账号评分] 网络异常: {type(e).__name__}")
             yield event.plain_result("❌ 网络请求失败，请稍后重试。")
-            return
-        except TimeoutError:
-            yield event.plain_result("❌ 请求超时（分析通常需要20-30秒），请稍后重试。")
             return
 
         if not data or "score" not in data:
@@ -207,7 +217,12 @@ class FljPlugin(Star):
         session = self._get_session()
         async with session.get(FLJ_VERIFY_URL, params=params) as resp:
             resp.raise_for_status()
-            data = await resp.json()
+            # 增加 JSONDecodeError 等防范
+            try:
+                data = await resp.json()
+            except Exception as e:
+                # 若抛出异常将被外层的 query_x_account 针对性捕获
+                raise e
         
         score = data.get("score", "?")
         logger.info(f"[X账号评分] @{username} 评分: {score}")
@@ -300,29 +315,26 @@ class FljPlugin(Star):
         eng_labels = {"high": "高", "medium": "中", "low": "低"}
         eng_level = eng_labels.get(engagement, "")
         
-        # 计算各项分数（与图片版逻辑一致）
-        b_age = min(25, int(account_age * 1.5))
-        if followers > 1000000: b_fol = 20
-        elif followers > 100000: b_fol = 15
-        elif followers > 10000: b_fol = 10
-        else: b_fol = 5
-        if tweets > 10000: b_twt = 8
-        elif tweets > 1000: b_twt = 5
-        else: b_twt = 2
-        b_ver = 10 if is_verified else 0
-        b_act = 5 if is_active else 0
-        if engagement == "high": b_eng = 8
-        elif engagement == "medium": b_eng = 5
-        else: b_eng = 2
-        if positives >= 10: b_pos = 10
-        elif positives >= 5: b_pos = 8
-        elif positives >= 1: b_pos = 5
-        else: b_pos = 0
-        if complaints >= 5: b_neg = -15
-        elif complaints >= 3: b_neg = -10
-        elif complaints >= 1: b_neg = -5
-        else: b_neg = 0
-        b_pin = -10 if pinned_has_url else 0
+        weights = calculate_score_weights(
+            account_age_years=account_age,
+            followers=followers,
+            tweets=tweets,
+            is_verified=is_verified,
+            is_active=is_active,
+            engagement=engagement,
+            positives=positives,
+            complaints=complaints,
+            pinned_has_url=pinned_has_url
+        )
+        b_age = weights["b_age"]
+        b_fol = weights["b_fol"]
+        b_twt = weights["b_twt"]
+        b_ver = weights["b_ver"]
+        b_act = weights["b_act"]
+        b_eng = weights["b_eng"]
+        b_pos = weights["b_pos"]
+        b_neg = weights["b_neg"]
+        b_pin = weights["b_pin"]
         
         age_label = f"{account_age:.1f}年" if account_age > 0 else "未知"
         pos_label = f"×{positives}" if positives > 0 else ""

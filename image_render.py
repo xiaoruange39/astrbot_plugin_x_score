@@ -7,9 +7,11 @@ import os
 import re
 import asyncio
 import platform
+import threading
 import urllib.parse
 from PIL import Image, ImageDraw, ImageFont, ImageFilter
 from astrbot.api import logger
+from .utils import calculate_score_weights
 
 # ==================== 颜色常量 ====================
 BG_COLOR = (10, 10, 10)           # 主背景 #0a0a0a
@@ -81,10 +83,23 @@ def _find_chinese_font() -> str | None:
             continue
     return None
 
-_global_font = _find_chinese_font()
+_global_font = None
+_font_initialized = False
+_font_lock = threading.Lock()
+
+def _init_font():
+    global _global_font, _font_initialized
+    if _font_initialized:
+        return
+    with _font_lock:
+        if _font_initialized:
+            return
+        _global_font = _find_chinese_font()
+        _font_initialized = True
 
 def _get_font(size: int, bold: bool = False) -> ImageFont.FreeTypeFont:
-    """获取支持中文的字体，找不到则返回默认"""
+    """获取支持中文的字体，延迟加载"""
+    _init_font()
     key = f"{size}_{bold}"
     if key in _font_cache:
         return _font_cache[key]
@@ -327,37 +342,31 @@ def _calculate_score_breakdown(score, detail: dict, data: dict | None = None) ->
     complaints = detail.get("complaints") or 0
     pinned_has_url = detail.get("pinned_tweet_has_url", False)
     
-    b_age = min(25, int(age * 1.5))
-    if fols > 1000000: b_fol = 20
-    elif fols > 100000: b_fol = 15
-    elif fols > 10000: b_fol = 10
-    else: b_fol = 5
+    # 验证是否认证和活跃
+    is_verified = detail.get("is_verified", False)
+    is_active = detail.get("is_active", False)
     
-    if twts > 10000: b_twt = 8
-    elif twts > 1000: b_twt = 5
-    else: b_twt = 2
+    weights = calculate_score_weights(
+        account_age_years=age,
+        followers=fols,
+        tweets=twts,
+        is_verified=is_verified,
+        is_active=is_active,
+        engagement=eng,
+        positives=positives,
+        complaints=complaints,
+        pinned_has_url=pinned_has_url
+    )
     
-    b_ver = 10 if detail.get("is_verified") else 0
-    b_act = 5 if detail.get("is_active") else 0
-    
-    if eng == "high": b_eng = 8
-    elif eng == "medium": b_eng = 5
-    else: b_eng = 2
-    
-    # 正面好评分数
-    if positives >= 10: b_pos = 10
-    elif positives >= 5: b_pos = 8
-    elif positives >= 1: b_pos = 5
-    else: b_pos = 0
-    
-    # 负面评价扣分
-    if complaints >= 5: b_neg = -15
-    elif complaints >= 3: b_neg = -10
-    elif complaints >= 1: b_neg = -5
-    else: b_neg = 0
-    
-    # 置顶推含外链扣分
-    b_pin = -10 if pinned_has_url else 0
+    b_age = weights["b_age"]
+    b_fol = weights["b_fol"]
+    b_twt = weights["b_twt"]
+    b_ver = weights["b_ver"]
+    b_act = weights["b_act"]
+    b_eng = weights["b_eng"]
+    b_pos = weights["b_pos"]
+    b_neg = weights["b_neg"]
+    b_pin = weights["b_pin"]
     
     # 计算差值
     allocated = 20 + b_age + b_fol + b_twt + b_ver + b_act + b_eng + b_pos + b_neg + b_pin
