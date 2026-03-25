@@ -9,6 +9,7 @@ import asyncio
 import platform
 import threading
 from PIL import Image, ImageDraw, ImageFont, ImageFilter, UnidentifiedImageError
+import emoji
 from astrbot.api import logger
 from .utils import calculate_score_weights
 
@@ -39,6 +40,16 @@ CARD_RADIUS = 32
 TAG_RADIUS = 16
 AVATAR_SIZE = 112
 SCORE_BOX_SIZE = 144
+
+LAYOUT = {
+    "HEADER_MARGIN_TOP": 100,
+    "LINE_HEIGHT_BIO": 36,
+    "LINE_HEIGHT_MID": 44,
+    "PADDING_SECTIONS": 24,
+    "SPACING_TAGS": 16,
+    "RADIUS_BANNER": 28,
+    "RADIUS_CARD": 24,
+}
 
 # ==================== 字体工具 ====================
 _font_cache = {}
@@ -201,7 +212,6 @@ def _draw_text_fallback(draw: ImageDraw.ImageDraw, xy, text: str, fill, fonts: l
 def _strip_emoji(text: str) -> str:
     """使用标准 emoji 库温和地剥离表情符号，保留特殊语言字符（孙悟空审阅建议）"""
     if not text: return ""
-    import emoji
     # 将标准 emoji 替换为空，同时保留基础标点和特殊字母
     cleaned = emoji.replace_emoji(text, replace='')
     # 额外剔除特定导致 PIL 崩溃但非标准 emoji 的干扰控制符
@@ -422,16 +432,6 @@ def _calculate_score_breakdown(score, detail: dict, data: dict | None = None) ->
 
 def _draw_sync(data: dict, avatar_img: Image.Image | None, media_imgs: list[Image.Image], blur_media: bool) -> bytes:
     """同步的 PIL 绘制逻辑，应在后台线程执行以防阻塞"""
-    # --- 常量字典：消除 Magic Numbers ---
-    LAYOUT = {
-        "HEADER_MARGIN_TOP": 100,
-        "LINE_HEIGHT_BIO": 36,
-        "LINE_HEIGHT_MID": 44,
-        "PADDING_SECTIONS": 24,
-        "SPACING_TAGS": 16,
-        "RADIUS_BANNER": 28,
-        "RADIUS_CARD": 24,
-    }
     
     score = data.get("score", 0)
     display_name = _strip_emoji(str(data.get("display_name", "未知") or "未知"))
@@ -514,7 +514,7 @@ def _draw_sync(data: dict, avatar_img: Image.Image | None, media_imgs: list[Imag
     for tag_text, _ in tags_list:
         tw = _text_width(tmp_draw, tag_text, fl_tag) + 24 
         
-        current_ty = header_h + (tag_rows - 1) * 44  # 标签行高设为 44px
+        current_ty = header_h + (tag_rows - 1) * LAYOUT["LINE_HEIGHT_MID"]  # 标签行高
         limit_w = card_content_w - SAFE_RIGHT_MARGIN
         # 如果标签行在评分盒子的垂直范围内，限制宽度
         if PADDING + current_ty < PADDING + CARD_PADDING + SCORE_BOX_SIZE:
@@ -525,7 +525,7 @@ def _draw_sync(data: dict, avatar_img: Image.Image | None, media_imgs: list[Imag
             tag_x = 0
         tag_x += tw + 12
     
-    tags_area_h = tag_rows * 44 + 20
+    tags_area_h = tag_rows * LAYOUT["LINE_HEIGHT_MID"] + 20
     
     # 计算警告横幅高度 (动态)
     warning_h = 0
@@ -540,7 +540,7 @@ def _draw_sync(data: dict, avatar_img: Image.Image | None, media_imgs: list[Imag
     bio_h = 0
     if bio:
         bio_lines = _wrap_text(tmp_draw, bio, fl_body, card_content_w - SAFE_RIGHT_MARGIN)[:3]
-        bio_h = len(bio_lines) * 36 + 24
+        bio_h = len(bio_lines) * LAYOUT["LINE_HEIGHT_BIO"] + LAYOUT["PADDING_SECTIONS"]
         
     # Stats 区域固定约 100px
     stats_h = 100 + 40 # stats + padding
@@ -550,12 +550,12 @@ def _draw_sync(data: dict, avatar_img: Image.Image | None, media_imgs: list[Imag
     # 中部高度 (评分明细 和 近期媒体 双列)
     col_w = (content_w - 24) // 2
     grid_size = (col_w - 36*2 - 16) // 2
-    media_grid_h = 100 + (2 * (grid_size + 16)) + 36 # approx
-    mid_card_h = max(100 + 11*44, media_grid_h)  # 取较高者，最多11项评分明细
+    media_grid_h = 100 + (2 * (grid_size + 16)) + LAYOUT["LINE_HEIGHT_BIO"] # approx
+    mid_card_h = max(100 + 11 * LAYOUT["LINE_HEIGHT_MID"], media_grid_h)  # 取较高者，最多11项评分明细
 
     # AI 评价卡片高度
     eval_lines = _wrap_text(tmp_draw, user_eval, fl_body, card_content_w - SAFE_RIGHT_MARGIN)[:12] if user_eval else []
-    eval_card_h = CARD_PADDING * 2 + 56 + len(eval_lines) * 36
+    eval_card_h = CARD_PADDING * 2 + 56 + len(eval_lines) * LAYOUT["LINE_HEIGHT_BIO"]
 
     # 正面/负面评价高度
     examples_h = 0
@@ -563,14 +563,14 @@ def _draw_sync(data: dict, avatar_img: Image.Image | None, media_imgs: list[Imag
         examples_h += 80 # title
         for ex in pos_examples[:10]:
             ex_lines = _wrap_text(tmp_draw, f"“{ex}”", fl_body, card_content_w - 40)
-            examples_h += len(ex_lines) * 36 + 20
+            examples_h += len(ex_lines) * LAYOUT["LINE_HEIGHT_BIO"] + 20
         examples_h += 40
     
     if neg_examples:
         examples_h += 80 # title
         for ex in neg_examples[:10]:
             ex_lines = _wrap_text(tmp_draw, f"“{ex}”", fl_body, card_content_w - 40)
-            examples_h += len(ex_lines) * 36 + 20
+            examples_h += len(ex_lines) * LAYOUT["LINE_HEIGHT_BIO"] + 20
         examples_h += 40
 
     footer_h = 80
