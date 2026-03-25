@@ -40,16 +40,16 @@ class FljPlugin(Star):
         return self._session
 
     @filter.command("X账号评分")
-    async def query_x_account(self, event: AstrMessageEvent):
+    async def query_x_account(self, event: AstrMessageEvent, username: str = ""):
         '''查询 X/Twitter 账号的可信度评分。用法：/X账号评分 <用户名>'''
 
-        # 防止硬编码别名失效：直接通过正则提取命令词之后的内容，适配任何自定义的前缀别名和空格
-        match = re.search(r'^\S+[\s]+(.*)', event.message_str.strip())
-        if match:
-            raw = match.group(1).strip()
-        else:
-            raw = ""
-        username = raw.strip()
+        # 优先使用 AstrBot 提取的参数，若因别名失效解析不到，则采用正则兜底整句抓取
+        username = username.strip()
+        if not username:
+            match = re.search(r'^\S+[\s]+(.*)', event.message_str.strip())
+            if match:
+                username = match.group(1).strip()
+                
         if not username:
             yield event.plain_result(
                 "❌ 请提供 X/Twitter 用户名。\n"
