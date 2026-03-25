@@ -38,17 +38,15 @@ PADDING = 56
 CARD_PADDING = 44
 CARD_RADIUS = 32
 TAG_RADIUS = 16
+BANNER_RADIUS = 12
 AVATAR_SIZE = 112
 SCORE_BOX_SIZE = 144
 
 LAYOUT = {
-    "HEADER_MARGIN_TOP": 100,
     "LINE_HEIGHT_BIO": 36,
     "LINE_HEIGHT_MID": 44,
     "PADDING_SECTIONS": 24,
     "SPACING_TAGS": 16,
-    "RADIUS_BANNER": 28,
-    "RADIUS_CARD": 24,
 }
 
 # ==================== 字体工具 ====================
@@ -278,7 +276,7 @@ def _draw_warning_banner(draw: ImageDraw.ImageDraw, x, y, width, text, fonts):
     
     line_h = 32
     banner_h = 20 + len(lines) * line_h
-    _rounded_rect(draw, (x, y, x + width, y + banner_h), 12, fill=bg_color, outline=border_color, width=1)
+    _rounded_rect(draw, (x, y, x + width, y + banner_h), BANNER_RADIUS, fill=bg_color, outline=border_color, width=1)
     
     # 绘制警告图标
     _draw_text_fallback(draw, (x + 16, y + 10), "⚠", text_color, fonts)
