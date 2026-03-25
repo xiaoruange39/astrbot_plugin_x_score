@@ -43,13 +43,12 @@ class FljPlugin(Star):
     async def query_x_account(self, event: AstrMessageEvent):
         '''查询 X/Twitter 账号的可信度评分。用法：/X账号评分 <用户名>'''
 
-        # event.message_str 包含完整消息，需要去掉指令名称部分
-        raw = event.message_str.strip()
-        # 去掉可能的指令前缀
-        for prefix in ["X账号评分", "/X账号评分"]:
-            if raw.startswith(prefix):
-                raw = raw[len(prefix):].strip()
-                break
+        # 防止硬编码别名失效：直接通过正则提取命令词之后的内容，适配任何自定义的前缀别名和空格
+        match = re.search(r'^\S+[\s]+(.*)', event.message_str.strip())
+        if match:
+            raw = match.group(1).strip()
+        else:
+            raw = ""
         username = raw.strip()
         if not username:
             yield event.plain_result(
@@ -216,7 +215,7 @@ class FljPlugin(Star):
         finally:
             self._pending.pop(key, None)
 
-    async def _do_fetch_verify(self, username, key) -> dict:
+    async def _do_fetch_verify(self, username: str, key: str) -> dict:
         params = {
             "username": username,
             "t": str(int(time.time() * 1000)),
@@ -226,18 +225,20 @@ class FljPlugin(Star):
         logger.info(f"[X账号评分] 查询 @{username}")
         session = self._get_session()
         async with session.get(FLJ_VERIFY_URL, params=params) as resp:
-            resp.raise_for_status()
-            # 增加 JSONDecodeError 等防范
             try:
+                # 倒置顺序：先尝试解析 JSON，如果遇到 502/503 的 HTML，ContentTypeError 会优先抛出，避免被 ClientResponseError 吞噬
                 data = await resp.json()
-            except aiohttp.client_exceptions.ContentTypeError as e:
-                raise e # Propagate to query_x_account
-            except json.JSONDecodeError as e:
-                raise e # Propagate to query_x_account
+                resp.raise_for_status()
+            except aiohttp.client_exceptions.ContentTypeError:
+                raise
+            except json.JSONDecodeError:
+                raise
+            except aiohttp.ClientResponseError:
+                raise
             except Exception as e:
                 # Catch any other unexpected errors during JSON parsing
                 logger.error(f"[X账号评分] 解析 API 响应失败: {type(e).__name__}: {e}")
-                raise e
+                raise
         
         score = data.get("score", "?")
         logger.info(f"[X账号评分] @{username} 评分: {score}")

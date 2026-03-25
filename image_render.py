@@ -99,6 +99,8 @@ def _init_font():
         if _font_initialized:
             return
         _global_font = _find_chinese_font()
+        if not _global_font:
+            logger.error("[X账号评分] 严重警告：系统未检测到任何有效的中文字体文件！生成的图片报告将出现文字乱码或豆腐块。请参考说明安装标准中文字库。")
         _font_initialized = True
 
 def _get_font(size: int, bold: bool = False) -> ImageFont.FreeTypeFont:
@@ -197,44 +199,19 @@ def _draw_text_fallback(draw: ImageDraw.ImageDraw, xy, text: str, fill, fonts: l
 
 
 def _strip_emoji(text: str) -> str:
-    """激进去除所有 Emoji、特殊符号和无法渲染的字符"""
+    """使用标准 emoji 库温和地剥离表情符号，保留特殊语言字符（孙悟空审阅建议）"""
     if not text: return ""
+    import emoji
+    # 将标准 emoji 替换为空，同时保留基础标点和特殊字母
+    cleaned = emoji.replace_emoji(text, replace='')
+    # 额外剔除特定导致 PIL 崩溃但非标准 emoji 的干扰控制符
     result = []
-    for char in str(text):
+    for char in cleaned:
         cp = ord(char)
-        # 跳过 SMP 平面 (大部分 emoji 在 0x10000+)
-        if cp > 0xFFFF: continue
-        # 跳过 Variation Selectors (FE00-FE0F)
-        if 0xFE00 <= cp <= 0xFE0F: continue
-        # 跳过 Arrows (2190-21FF)
-        if 0x2190 <= cp <= 0x21FF: continue
-        # 跳过 Misc Technical (2300-23FF) - 包含 ⌛⏰ 等
-        if 0x2300 <= cp <= 0x23FF: continue
-        # 跳过 Enclosed Alphanumerics (2460-24FF)
-        if 0x2460 <= cp <= 0x24FF: continue
-        # 跳过 Box Drawing / Block Elements (2500-259F)
-        # if 0x2500 <= cp <= 0x259F: continue
-        # 跳过 Misc Symbols (2600-26FF) - 包含 ☀⚠♻ 等
-        if 0x2600 <= cp <= 0x26FF: continue
-        # 跳过 Dingbats (2700-27BF) - 包含 ✅✓✗ 等
-        if 0x2700 <= cp <= 0x27BF: continue
-        # 跳过 Supplemental Arrows (27F0-27FF, 2900-297F)
-        if 0x27F0 <= cp <= 0x27FF: continue
-        if 0x2900 <= cp <= 0x297F: continue
-        # 跳过 Misc Symbols and Arrows (2B00-2BFF)
-        if 0x2B00 <= cp <= 0x2BFF: continue
-        # 跳过 CJK Symbols supplement that cause issues
-        # 跳过 Private Use Area
-        if 0xE000 <= cp <= 0xF8FF: continue
-        # 跳过 Specials
-        if 0xFFF0 <= cp <= 0xFFFF: continue
-        # 跳过特定的箭头和问题符号
-        if char in '➝➜➤➡➔➞➝→←↑↓↔↕↗↘↙↖⇒⇐⇑⇓⇔': continue
+        if 0xFE00 <= cp <= 0xFE0F: continue # Variation Selectors
         result.append(char)
-    # 清理多余空格
-    cleaned = ''.join(result)
-    cleaned = re.sub(r'  +', ' ', cleaned).strip()
-    return cleaned
+    cleaned = "".join(result)
+    return re.sub(r'  +', ' ', cleaned).strip()
 
 
 def _wrap_text(draw: ImageDraw.ImageDraw, text: str, fonts: list, max_width: int) -> list:
@@ -445,6 +422,16 @@ def _calculate_score_breakdown(score, detail: dict, data: dict | None = None) ->
 
 def _draw_sync(data: dict, avatar_img: Image.Image | None, media_imgs: list[Image.Image], blur_media: bool) -> bytes:
     """同步的 PIL 绘制逻辑，应在后台线程执行以防阻塞"""
+    # --- 常量字典：消除 Magic Numbers ---
+    LAYOUT = {
+        "HEADER_MARGIN_TOP": 100,
+        "LINE_HEIGHT_BIO": 36,
+        "LINE_HEIGHT_MID": 44,
+        "PADDING_SECTIONS": 24,
+        "SPACING_TAGS": 16,
+        "RADIUS_BANNER": 28,
+        "RADIUS_CARD": 24,
+    }
     
     score = data.get("score", 0)
     display_name = _strip_emoji(str(data.get("display_name", "未知") or "未知"))
@@ -635,16 +622,16 @@ def _draw_sync(data: dict, avatar_img: Image.Image | None, media_imgs: list[Imag
         tx += tw + 12
 
     # 绘制警告横幅 (如果需要)
-    current_y = y + header_h + tag_rows * 44 + 20
+    current_y = ty + 44 + 32 # 使用实际算出的 tag height 游标 (ty) 给足 32px 的安全边距
     if show_warning:
         warning_banner_h = _draw_warning_banner(draw, cx, current_y, card_content_w, warning_text, fl_small)
-        current_y += warning_banner_h + 24
+        current_y += warning_banner_h + LAYOUT["PADDING_SECTIONS"] + 8
         
     # 绘制 Bio
     if bio:
         bio_y = current_y
         for i, line in enumerate(bio_lines):
-            _draw_text_fallback(draw, (cx, bio_y + i * 36), line, TEXT_GRAY, fl_body)
+            _draw_text_fallback(draw, (cx, bio_y + i * LAYOUT["LINE_HEIGHT_BIO"]), line, TEXT_GRAY, fl_body)
         current_y += bio_h
         
     # 绘制分割线和统计
