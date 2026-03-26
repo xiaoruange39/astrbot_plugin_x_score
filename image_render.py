@@ -31,6 +31,8 @@ TAG_BG = (30, 30, 36)             # 标签背景
 TAG_BORDER = (55, 55, 65)         # 标签边框
 ACCENT_BLUE = (59, 130, 246)      # 蓝色标签
 WELFARE_RED = (220, 38, 38)       # 福利号红色
+EXPOSE_BG = (45, 20, 20)          # 爆料卡片背景 (暗红)
+EXPOSE_BORDER = (80, 40, 40)      # 爆料卡片边框
 
 # ==================== 布局常量 ====================
 IMG_WIDTH = 1200
@@ -278,8 +280,13 @@ def _draw_warning_banner(draw: ImageDraw.ImageDraw, x, y, width, text, fonts):
     banner_h = 20 + len(lines) * line_h
     _rounded_rect(draw, (x, y, x + width, y + banner_h), BANNER_RADIUS, fill=bg_color, outline=border_color, width=1)
     
-    # 绘制警告图标
-    _draw_text_fallback(draw, (x + 16, y + 10), "⚠", text_color, fonts)
+    # 绘制警告图标 (精准居中于左侧 40x44 区域)
+    icon_f = fonts[0]
+    bbox = draw.textbbox((0, 0), "!", font=icon_f)
+    tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
+    ix = x + 24 - tw // 2 - bbox[0]
+    iy = y + 26 - th // 2 - bbox[1]
+    _draw_text_fallback(draw, (ix, iy), "!", text_color, fonts)
     
     # 绘制多行文字
     for i, line in enumerate(lines):
@@ -426,7 +433,57 @@ def _calculate_score_breakdown(score, detail: dict, data: dict | None = None) ->
     
     return items
 
-# ==================== 主渲染函数 ====================
+def _draw_expose_card(draw, x, y, width, data, font_content, font_small):
+    """绘制网友爆料卡片"""
+    content = str(data.get("content", "")).strip()
+    user_name = str(data.get("user_name", "匿名爆料"))
+    # 处理时间格式 2026-03-25T15:23:14.202Z -> 2026/03/25 15:23
+    created_at = str(data.get("created_at", "")).replace("T", " ").split(".")[0]
+    if len(created_at) > 16: created_at = created_at[:16]
+    upvotes = data.get("upvotes", 0)
+    
+    padding = 32
+    inner_width = width - 2 * padding
+    # 使用 fl_body (font_content) 进行分行
+    lines = _wrap_text(draw, content, font_content, inner_width)
+    
+    content_h = len(lines) * LAYOUT["LINE_HEIGHT_BIO"]
+    card_h = 24 + 40 + 16 + content_h + 20 + 44 + 24 # 边距+顶部+间距+内容+间距+底部按钮+底边距
+    
+    # 背景
+    _rounded_rect(draw, (x, y, x + width, y + card_h), 16, fill=EXPOSE_BG, outline=EXPOSE_BORDER, width=2)
+    
+    curr_y = y + 24
+    # 顶部：图标占位 + 作者 + 时间
+    draw.ellipse((x + padding, curr_y, x + padding + 36, curr_y + 36), fill=(60, 30, 30))
+    # 居中画个感叹号代替火图标 (使用精确对齐逻辑)
+    # 圈圈是 36x36
+    center_x, center_y = x + padding + 18, curr_y + 18
+    # 获取文字 bbox 以实现像素级居中
+    char_f = font_small[0]
+    bbox = draw.textbbox((0, 0), "!", font=char_f)
+    tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
+    tx = center_x - tw // 2 - bbox[0]
+    ty = center_y - th // 2 - bbox[1]
+    _draw_text_fallback(draw, (tx, ty), "!", SCORE_RED, font_small)
+    
+    _draw_text_fallback(draw, (x + padding + 52, curr_y + 4), user_name, SCORE_RED, font_small)
+    time_w = _text_width(draw, created_at, font_small)
+    _draw_text_fallback(draw, (x + width - padding - time_w, curr_y + 4), created_at, TEXT_MUTED, font_small)
+    
+    curr_y += 56
+    # 内容文字
+    for i, line in enumerate(lines):
+        _draw_text_fallback(draw, (x + padding, curr_y + i * LAYOUT["LINE_HEIGHT_BIO"]), line, TEXT_WHITE, font_content)
+    
+    curr_y += content_h + 24
+    # 底部点赞按钮 (移除 emoji)
+    up_text = f"坐实 {upvotes}"
+    btn_w = _text_width(draw, up_text, font_small) + 32
+    _rounded_rect(draw, (x + padding, curr_y, x + padding + btn_w, curr_y + 44), 12, fill=(30, 45, 30), outline=(50, 80, 50))
+    _draw_text_fallback(draw, (x + padding + 16, curr_y + 6), up_text, SCORE_GREEN, font_small)
+    
+    return card_h
 
 def _draw_sync(data: dict, avatar_img: Image.Image | None, media_imgs: list[Image.Image], blur_media: bool) -> bytes:
     """同步的 PIL 绘制逻辑，应在后台线程执行以防阻塞"""
@@ -497,7 +554,7 @@ def _draw_sync(data: dict, avatar_img: Image.Image | None, media_imgs: list[Imag
         
     if location: tags_list.append((location, TEXT_GRAY))
     if primary_language: tags_list.append((primary_language, TEXT_GRAY))
-    if is_verified: tags_list.append(("✓ 已认证", ACCENT_BLUE))
+    if is_verified: tags_list.append(("已认证", ACCENT_BLUE))
     if is_welfare: tags_list.append(("福利号", WELFARE_RED))
     if is_fushi: tags_list.append(("付费", SCORE_ORANGE))
     if has_threshold: tags_list.append(("有门槛", SCORE_ORANGE))
@@ -571,8 +628,19 @@ def _draw_sync(data: dict, avatar_img: Image.Image | None, media_imgs: list[Imag
             examples_h += len(ex_lines) * LAYOUT["LINE_HEIGHT_BIO"] + 20
         examples_h += 40
 
+    # 网友爆料高度计算
+    exposes = data.get("exposes") or []
+    expose_section_h = 0
+    if exposes:
+        expose_section_h = 80 # title + gap
+        for exp in exposes[:3]:
+            exp_content = str(exp.get("content", "")).strip()
+            exp_lines = _wrap_text(tmp_draw, exp_content, fl_body, card_content_w - 64)
+            exp_h = 24 + 40 + 16 + len(exp_lines) * LAYOUT["LINE_HEIGHT_BIO"] + 20 + 44 + 24
+            expose_section_h += exp_h + 24
+            
     footer_h = 80
-    total_h = PADDING + header_total + 24 + mid_card_h + 24 + eval_card_h + (24 + examples_h if examples_h > 0 else 0) + 24 + footer_h + PADDING
+    total_h = PADDING + header_total + 24 + mid_card_h + 24 + eval_card_h + (24 + examples_h if examples_h > 0 else 0) + (24 + expose_section_h if expose_section_h > 0 else 0) + 24 + footer_h + PADDING
 
     # ==================== 开始绘制 ====================
     img = Image.new("RGB", (IMG_WIDTH, total_h), BG_COLOR)
@@ -742,7 +810,15 @@ def _draw_sync(data: dict, avatar_img: Image.Image | None, media_imgs: list[Imag
         
         y += examples_h + 24
 
-    # 5. 底部信息
+    # 5. 网友爆料
+    if expose_section_h > 0:
+        _draw_text_fallback(draw, (PADDING + 8, y), "网友爆料", SCORE_RED, fl_section)
+        y += 80
+        for exp in exposes[:3]:
+            ch = _draw_expose_card(draw, PADDING, y, IMG_WIDTH - 2*PADDING, exp, fl_body, fl_small)
+            y += ch + 24
+
+    # 6. 底部信息
     footer_text = "X账号评分 flj.info · 数据仅供参考"
     _draw_text_fallback(draw, ((IMG_WIDTH - _text_width(draw, footer_text, fl_small)) // 2, y + 16), footer_text, TEXT_MUTED, fl_small)
 

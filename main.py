@@ -17,6 +17,7 @@ from .image_render import render_report
 
 FLJ_API_BASE = "https://flj.info/api"
 FLJ_VERIFY_URL = f"{FLJ_API_BASE}/verify"
+FLJ_COMMENTS_URL = f"{FLJ_API_BASE}/comments"
 FLJ_WEB_URL = "https://flj.info/verify"
 REQUEST_TIMEOUT = 60  # flj.info 分析通常需要 20-30 秒
 CACHE_TTL = 300  # 缓存 5 分钟
@@ -243,13 +244,36 @@ class FljPlugin(Star):
         score = data.get("score", "?")
         logger.info(f"[X账号评分] @{username} 评分: {score}")
         
-        # 写入缓存，并限制最大缓存数量为 100
+        # 4. 获取网友爆料
+        try:
+            exposes = await self._fetch_exposes(username)
+            data["exposes"] = exposes
+        except Exception as e:
+            logger.warning(f"[X账号评分] 获取网友爆料失败: {e}")
+            data["exposes"] = []
+            
+        # 5. 写入缓存，并限制最大缓存数量为 100
         self._cache[key] = (time.time(), data)
         if len(self._cache) > 100:
             oldest_key = min(self._cache.keys(), key=lambda k: self._cache[k][0])
             del self._cache[oldest_key]
             
         return data
+
+    async def _fetch_exposes(self, username: str) -> list:
+        """获取网友爆料数据 (is_expose 为 true 的评论)"""
+        params = {"username": username}
+        session = self._get_session()
+        try:
+            async with session.get(FLJ_COMMENTS_URL, params=params) as resp:
+                if resp.status == 200:
+                    comments = await resp.json()
+                    if isinstance(comments, list):
+                        # 仅保留爆料类型
+                        return [c for c in comments if isinstance(c, dict) and c.get("is_expose")]
+        except Exception as e:
+            logger.debug(f"[X账号评分] 获取评论接口异常: {e}")
+        return []
 
     def _format_result(self, data: dict) -> str:
         """纯文本格式（完整版，与图片版内容一致）"""
@@ -387,20 +411,31 @@ class FljPlugin(Star):
         # 正面评价
         if pos_examples:
             lines.append(f"")
-            lines.append(f"👍 正面评价：")
+            lines.append(f"正面评价：")
             for ex in pos_examples[:5]:
                 lines.append(f'  "{str(ex)[:100]}"')
 
         # 负面评价
         if neg_examples:
             lines.append(f"")
-            lines.append(f"🚨 负面评价：")
+            lines.append(f"负面评价：")
             for ex in neg_examples[:5]:
                 lines.append(f'  "{str(ex)[:100]}"')
 
+        # 网友爆料
+        exposes = data.get("exposes") or []
+        if exposes:
+            lines.append(f"")
+            lines.append(f"网友爆料：")
+            for exp in exposes[:3]:
+                content = str(exp.get("content", "")).strip()
+                up = exp.get("upvotes", 0)
+                lines.append(f"• {content}")
+                lines.append(f"  ({up} 人坐实)")
+
         lines.extend([
             f"",
-            f"⚠ 检索结果仅供参考",
+            f"注：检索结果仅供参考",
             f"🔗 {FLJ_WEB_URL}/{username}",
         ])
         return "\n".join(lines)
