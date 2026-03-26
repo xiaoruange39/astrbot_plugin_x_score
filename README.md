@@ -50,3 +50,8 @@
 ├── _conf_schema.json   # 配置项定义
 └── requirements.txt    # Python 依赖
 ```
+
+---
+
+- **作者**: [xiaoruange39](https://github.com/xiaoruange39)
+- **QQ群**: [QQ群](https://qm.qq.com/q/8kdJ2Bzf6S)
