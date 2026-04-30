@@ -4,7 +4,7 @@
 
 查询 X(Twitter) 账号可信度评分，基于 [flj.info](https://flj.info) 的 AI 分析。
 
-![Preview](https://picui.ogmua.cn/s1/2026/03/25/69c3b9360e8af.webp)
+![Preview](https://github.com/xiaoruange39/Plugin-Preview-Image/blob/main/image/Image_1777519815672_272.png)
 
 ## 功能
 
