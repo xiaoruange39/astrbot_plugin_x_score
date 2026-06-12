@@ -441,6 +441,7 @@ def _draw_expose_card(draw, x, y, width, data, font_content, font_small):
     created_at = str(data.get("created_at", "")).replace("T", " ").split(".")[0]
     if len(created_at) > 16: created_at = created_at[:16]
     upvotes = data.get("upvotes", 0)
+    downvotes = data.get("downvotes", 0)
     
     padding = 32
     inner_width = width - 2 * padding
@@ -477,12 +478,18 @@ def _draw_expose_card(draw, x, y, width, data, font_content, font_small):
         _draw_text_fallback(draw, (x + padding, curr_y + i * LAYOUT["LINE_HEIGHT_BIO"]), line, TEXT_WHITE, font_content)
     
     curr_y += content_h + 24
-    # 底部点赞按钮 (移除 emoji)
+    # 底部投票按钮：坐实（赞同）/ 瞎说（反对），与网页一致
     up_text = f"坐实 {upvotes}"
-    btn_w = _text_width(draw, up_text, font_small) + 32
-    _rounded_rect(draw, (x + padding, curr_y, x + padding + btn_w, curr_y + 44), 12, fill=(30, 45, 30), outline=(50, 80, 50))
+    up_btn_w = _text_width(draw, up_text, font_small) + 32
+    _rounded_rect(draw, (x + padding, curr_y, x + padding + up_btn_w, curr_y + 44), 12, fill=(30, 45, 30), outline=(50, 80, 50))
     _draw_text_fallback(draw, (x + padding + 16, curr_y + 6), up_text, SCORE_GREEN, font_small)
-    
+
+    down_text = f"瞎说 {downvotes}"
+    down_btn_w = _text_width(draw, down_text, font_small) + 32
+    down_x = x + padding + up_btn_w + 16
+    _rounded_rect(draw, (down_x, curr_y, down_x + down_btn_w, curr_y + 44), 12, fill=(45, 30, 30), outline=(80, 50, 50))
+    _draw_text_fallback(draw, (down_x + 16, curr_y + 6), down_text, TEXT_MUTED, font_small)
+
     return card_h
 
 def _draw_sync(data: dict, avatar_img: Image.Image | None, media_imgs: list[Image.Image], blur_media: bool) -> bytes:

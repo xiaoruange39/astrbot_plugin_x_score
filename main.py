@@ -5,6 +5,7 @@ import base64
 import asyncio
 import aiohttp
 import json
+import random
 import tempfile
 from .utils import calculate_score_weights
 from astrbot.api.event import filter, AstrMessageEvent, MessageChain
@@ -18,12 +19,15 @@ from .image_render import render_report
 FLJ_API_BASE = "https://flj.info/api"
 FLJ_VERIFY_URL = f"{FLJ_API_BASE}/verify"
 FLJ_COMMENTS_URL = f"{FLJ_API_BASE}/comments"
+FLJ_RANKINGS_URL = f"{FLJ_API_BASE}/rankings"
 FLJ_WEB_URL = "https://flj.info/verify"
 REQUEST_TIMEOUT = 60  # flj.info 分析通常需要 20-30 秒
 CACHE_TTL = 300  # 缓存 5 分钟
+RANKING_PAGE_SIZE = 50  # 排行榜每页条数
+RANKING_MAX_PAGE = 140  # 排行榜兜底最大页数（total≈7001，约 140 页）
 
 
-@register("astrbot_plugin_x_score", "X账号评分", "查询 X/Twitter 账号可信度评分", "1.2.0")
+@register("astrbot_plugin_x_score", "X账号评分", "查询 X/Twitter 账号可信度评分", "1.3.0")
 class FljPlugin(Star):
     """X账号评分插件 - 查询 X/Twitter 账号可信度评分"""
 
@@ -70,7 +74,35 @@ class FljPlugin(Star):
             )
             return
 
-        if self.config.get("show_analyze_alert", True):
+        async for reply in self._render_and_send(event, username):
+            yield reply
+
+    @filter.command("X随机查询")
+    async def query_random_x_account(self, event: AstrMessageEvent):
+        '''从 flj.info 排行榜中随机抽取一个账号进行评分查询。用法：/X随机查询'''
+        try:
+            username = await self._fetch_random_username()
+        except (TimeoutError, asyncio.TimeoutError):
+            yield event.plain_result("❌ 获取排行榜超时，请稍后重试。")
+            return
+        except Exception as e:
+            logger.error(f"[X账号评分] 获取随机用户失败: {type(e).__name__}: {e}")
+            yield event.plain_result("❌ 获取排行榜失败，请稍后重试。")
+            return
+
+        if not username:
+            yield event.plain_result("❌ 未能从排行榜中抽取到用户，请稍后重试。")
+            return
+
+        # 随机查询必须告知抽中的是谁，故无条件提示
+        yield event.plain_result(f"🎲 本次随机抽中 @{username}，正在分析...")
+
+        async for reply in self._render_and_send(event, username, announce=False):
+            yield reply
+
+    async def _render_and_send(self, event: AstrMessageEvent, username: str, announce: bool = True):
+        """根据用户名拉取评分数据、渲染并分发消息（被普通查询与随机查询共用）"""
+        if announce and self.config.get("show_analyze_alert", True):
             yield event.plain_result(f"正在分析 @{username}，请稍候...")
 
         try:
@@ -110,13 +142,13 @@ class FljPlugin(Star):
 
         # 预先生成 fallback_text 以防止未定义错误
         fallback_text = self._format_result(data)
-        
+
         # 根据配置选择输出模式
         output_mode = self.config.get("output_mode", "图片")
-        
+
         message_data = None
         img_bytes_cache = None
-        
+
         if output_mode == "文字":
             message_data = [{"type": "text", "data": {"text": fallback_text}}]
         else:
@@ -135,6 +167,37 @@ class FljPlugin(Star):
         # 调用独立的发送协程，彻底解耦业务流与分发链路
         async for reply in self._dispatch_message(event, message_data, fallback_text, img_bytes_cache):
             yield reply
+
+    async def _fetch_random_username(self) -> str | None:
+        """从排行榜随机抽取一个用户名"""
+        page = random.randint(1, RANKING_MAX_PAGE)
+        items, total = await self._fetch_rankings_page(page)
+
+        # 若随机页超出实际范围（返回空），用真实 total 重新计算页码再抽一次
+        if not items and total:
+            max_page = max(1, (total + RANKING_PAGE_SIZE - 1) // RANKING_PAGE_SIZE)
+            page = random.randint(1, max_page)
+            items, total = await self._fetch_rankings_page(page)
+
+        if not items:
+            return None
+
+        candidates = [
+            str(i["twitter_username"]).lstrip("@")
+            for i in items
+            if isinstance(i, dict) and i.get("twitter_username")
+        ]
+        return random.choice(candidates) if candidates else None
+
+    async def _fetch_rankings_page(self, page: int) -> tuple[list, int]:
+        """拉取排行榜某一页，返回 (items, total)"""
+        session = self._get_session()
+        async with session.get(FLJ_RANKINGS_URL, params={"page": page}) as resp:
+            resp.raise_for_status()
+            data = await resp.json()
+        items = data.get("items") or []
+        total = data.get("total") or 0
+        return (items if isinstance(items, list) else []), int(total)
 
     async def _dispatch_message(self, event: AstrMessageEvent, message_data: list, fallback_text: str, img_bytes_cache: bytes | None):
         """分发与发送引擎，支持平台特异性与通用降级，包含撤回调度"""
@@ -430,8 +493,9 @@ class FljPlugin(Star):
             for exp in exposes[:3]:
                 content = str(exp.get("content", "")).strip()
                 up = exp.get("upvotes", 0)
+                down = exp.get("downvotes", 0)
                 lines.append(f"• {content}")
-                lines.append(f"  ({up} 人坐实)")
+                lines.append(f"  (👍坐实 {up} · 👎瞎说 {down})")
 
         lines.extend([
             f"",
