@@ -41,7 +41,8 @@ class FljPlugin(Star):
         
     def _get_session(self) -> aiohttp.ClientSession:
         if self._session is None or self._session.closed:
-            self._session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=REQUEST_TIMEOUT))
+            proxy = self.config.get("proxy", "") or None
+            self._session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=REQUEST_TIMEOUT), proxy=proxy)
         return self._session
 
     @filter.command("X账号评分")

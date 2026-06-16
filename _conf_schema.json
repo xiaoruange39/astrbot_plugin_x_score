@@ -23,5 +23,11 @@
         "hint": "是否对近期媒体图片进行模糊打码处理。",
         "type": "bool",
         "default": false
+    },
+    "proxy": {
+        "description": "HTTP 代理地址",
+        "hint": "可为网络请求设置代理，如 http://127.0.0.1:7890 。留空则不使用代理。",
+        "type": "string",
+        "default": ""
     }
 }
