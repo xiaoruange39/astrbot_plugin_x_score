@@ -24,6 +24,12 @@
         "type": "bool",
         "default": false
     },
+    "font_path": {
+        "description": "自定义字体路径",
+        "hint": "生成评分图片时使用的字体文件路径。支持绝对路径，或相对于插件目录 / fonts 目录的 .ttf、.ttc、.otf 文件；留空则自动查找系统中文字体。",
+        "type": "string",
+        "default": ""
+    },
     "proxy": {
         "description": "HTTP 代理地址",
         "hint": "可为网络请求设置代理，如 http://127.0.0.1:7890 。留空则不使用代理。",

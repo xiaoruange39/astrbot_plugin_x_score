@@ -52,12 +52,50 @@ LAYOUT = {
 }
 
 # ==================== 字体工具 ====================
-_font_cache = {}
+FONT_EXTENSIONS = ('.ttf', '.ttc', '.otf')
 
-def _find_chinese_font() -> str | None:
+def _resolve_custom_font_path(font_path: str | None) -> str | None:
+    """解析配置中的自定义字体路径。"""
+    font_path = str(font_path or "").strip().strip('"').strip("'")
+    if not font_path:
+        return None
+
+    raw_path = os.path.expanduser(font_path)
+    current_dir = os.path.dirname(os.path.abspath(__file__))
+    candidates = []
+
+    if os.path.isabs(raw_path):
+        candidates.append(raw_path)
+    else:
+        candidates.extend([
+            os.path.join(current_dir, raw_path),
+            os.path.join(current_dir, "fonts", raw_path),
+            os.path.join(current_dir, "resources", "fonts", raw_path),
+        ])
+        if os.path.basename(raw_path) != raw_path:
+            candidates.append(os.path.join(current_dir, "fonts", os.path.basename(raw_path)))
+
+    checked = []
+    for candidate in candidates:
+        candidate = os.path.abspath(candidate)
+        checked.append(candidate)
+        if not candidate.lower().endswith(FONT_EXTENSIONS):
+            continue
+        if os.path.isfile(candidate):
+            logger.info(f"[X账号评分] 使用自定义字体: {candidate}")
+            return candidate
+
+    logger.warning(f"[X账号评分] 自定义字体不可用，已回退自动字体: {font_path}; 已检查: {' | '.join(checked)}")
+    return None
+
+def _find_chinese_font(custom_font_path: str | None = None) -> str | None:
+    custom_font = _resolve_custom_font_path(custom_font_path)
+    if custom_font:
+        return custom_font
+
     current_dir = os.path.dirname(os.path.abspath(__file__))
     for file in os.listdir(current_dir):
-        if file.lower().endswith(('.ttf', '.ttc', '.otf')):
+        if file.lower().endswith(FONT_EXTENSIONS):
             return os.path.join(current_dir, file)
             
     import subprocess
@@ -67,7 +105,7 @@ def _find_chinese_font() -> str | None:
             if result.returncode == 0 and result.stdout:
                 for line in result.stdout.strip().split('\n'):
                     file_path = line.split(':')[0].strip()
-                    if file_path.lower().endswith(('.ttf', '.ttc', '.otf')) and os.path.exists(file_path):
+                    if file_path.lower().endswith(FONT_EXTENSIONS) and os.path.exists(file_path):
                         return file_path
         except (OSError, subprocess.SubprocessError):
             pass
@@ -98,26 +136,31 @@ def _find_chinese_font() -> str | None:
 
 _global_font = None
 _font_initialized = False
+_font_requested_key = None
 _font_lock = threading.Lock()
 _font_cache = {}
 _cache_lock = threading.Lock()
 
-def _init_font():
-    global _global_font, _font_initialized
-    if _font_initialized:
+def _init_font(custom_font_path: str | None = None):
+    global _global_font, _font_initialized, _font_requested_key
+    requested_key = str(custom_font_path or "").strip()
+    if _font_initialized and _font_requested_key == requested_key:
         return
     with _font_lock:
-        if _font_initialized:
+        if _font_initialized and _font_requested_key == requested_key:
             return
-        _global_font = _find_chinese_font()
+        _global_font = _find_chinese_font(custom_font_path)
+        _font_requested_key = requested_key
+        with _cache_lock:
+            _font_cache.clear()
         if not _global_font:
             logger.error("[X账号评分] 严重警告：系统未检测到任何有效的中文字体文件！生成的图片报告将出现文字乱码或豆腐块。请参考说明安装标准中文字库。")
         _font_initialized = True
 
-def _get_font(size: int, bold: bool = False) -> ImageFont.FreeTypeFont:
+def _get_font(size: int, bold: bool = False, custom_font_path: str | None = None) -> ImageFont.FreeTypeFont:
     """获取支持中文的字体，延迟加载"""
-    _init_font()
-    key = f"{size}_{bold}"
+    _init_font(custom_font_path)
+    key = f"{_font_requested_key}_{size}_{bold}"
     
     with _cache_lock:
         if key in _font_cache:
@@ -136,9 +179,9 @@ def _get_font(size: int, bold: bool = False) -> ImageFont.FreeTypeFont:
         _font_cache[key] = font
     return font
 
-def _get_font_list(size: int, bold: bool = False):
+def _get_font_list(size: int, bold: bool = False, custom_font_path: str | None = None):
     """返回字体列表"""
-    return [_get_font(size, bold)]
+    return [_get_font(size, bold, custom_font_path)]
 
 
 # ==================== 绘图工具 ====================
@@ -492,7 +535,7 @@ def _draw_expose_card(draw, x, y, width, data, font_content, font_small):
 
     return card_h
 
-def _draw_sync(data: dict, avatar_img: Image.Image | None, media_imgs: list[Image.Image], blur_media: bool) -> bytes:
+def _draw_sync(data: dict, avatar_img: Image.Image | None, media_imgs: list[Image.Image], blur_media: bool, font_path: str = "") -> bytes:
     """同步的 PIL 绘制逻辑，应在后台线程执行以防阻塞"""
     
     score = data.get("score", 0)
@@ -525,16 +568,16 @@ def _draw_sync(data: dict, avatar_img: Image.Image | None, media_imgs: list[Imag
     score_color = _get_score_color(score)
     score_label = _get_score_label(score)
 
-    fl_name = _get_font_list(36, bold=True)
-    fl_handle = _get_font_list(26)
-    fl_body = _get_font_list(26)
-    fl_small = _get_font_list(22)
-    fl_score = _get_font_list(56, bold=True)
-    fl_score_label = _get_font_list(22)
-    fl_stat_num = _get_font_list(32, bold=True)
-    fl_stat_label = _get_font_list(22)
-    fl_section = _get_font_list(28, bold=True)
-    fl_tag = _get_font_list(22)
+    fl_name = _get_font_list(36, bold=True, custom_font_path=font_path)
+    fl_handle = _get_font_list(26, custom_font_path=font_path)
+    fl_body = _get_font_list(26, custom_font_path=font_path)
+    fl_small = _get_font_list(22, custom_font_path=font_path)
+    fl_score = _get_font_list(56, bold=True, custom_font_path=font_path)
+    fl_score_label = _get_font_list(22, custom_font_path=font_path)
+    fl_stat_num = _get_font_list(32, bold=True, custom_font_path=font_path)
+    fl_stat_label = _get_font_list(22, custom_font_path=font_path)
+    fl_section = _get_font_list(28, bold=True, custom_font_path=font_path)
+    fl_tag = _get_font_list(22, custom_font_path=font_path)
 
     tmp_img = Image.new("RGB", (IMG_WIDTH, 200))
     tmp_draw = ImageDraw.Draw(tmp_img)
@@ -833,7 +876,7 @@ def _draw_sync(data: dict, avatar_img: Image.Image | None, media_imgs: list[Imag
     img.save(buf, format="PNG", optimize=True)
     return buf.getvalue()
 
-async def render_report(session, data: dict, blur_media: bool = False) -> bytes:
+async def render_report(session, data: dict, blur_media: bool = False, font_path: str = "") -> bytes:
     avatar_url = data.get("avatar_url", "")
     media_urls = (data.get("media_urls") or [])[:4]
     
@@ -854,4 +897,4 @@ async def render_report(session, data: dict, blur_media: bool = False) -> bytes:
     avatar_img = dl_results[0] if isinstance(dl_results[0], Image.Image) else None
     media_imgs = [m for m in dl_results[1:] if isinstance(m, Image.Image)]
     
-    return await asyncio.to_thread(_draw_sync, data, avatar_img, media_imgs, blur_media)
+    return await asyncio.to_thread(_draw_sync, data, avatar_img, media_imgs, blur_media, font_path)

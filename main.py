@@ -27,7 +27,7 @@ RANKING_PAGE_SIZE = 50  # 排行榜每页条数
 RANKING_MAX_PAGE = 140  # 排行榜兜底最大页数（total≈7001，约 140 页）
 
 
-@register("astrbot_plugin_x_score", "X账号评分", "查询 X/Twitter 账号可信度评分", "1.3.0")
+@register("astrbot_plugin_x_score", "X账号评分", "查询 X/Twitter 账号可信度评分", "1.0.5")
 class FljPlugin(Star):
     """X账号评分插件 - 查询 X/Twitter 账号可信度评分"""
 
@@ -155,10 +155,11 @@ class FljPlugin(Star):
         else:
             # 图片模式
             blur_media = self.config.get("blur_media", False)
+            font_path = self.config.get("font_path", "")
             try:
                 # 传入公用的 session 以复用连接
                 session = self._get_session()
-                img_bytes_cache = await render_report(session, data, blur_media=blur_media)
+                img_bytes_cache = await render_report(session, data, blur_media=blur_media, font_path=font_path)
                 img_base64 = base64.b64encode(img_bytes_cache).decode('utf-8')
                 message_data = [{"type": "image", "data": {"file": f"base64://{img_base64}"}}]
             except Exception as e:
